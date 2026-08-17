@@ -1,0 +1,970 @@
+import AppKit
+import Foundation
+import Observation
+import UserNotifications
+import JBenchCore
+
+/// Main-window state and the app's only composition root. The default path uses
+/// the locally discovered Codex/OpenCode executables. Fake lanes are available
+/// only through the explicit provider-free demo action.
+@Observable @MainActor
+final class JBenchAppStore: JBenchRunService {
+    var section: AppSection = .newRun
+    var prompt = ""
+    var runTitle = ""
+    var directory: String
+    var executionMode: ExecutionMode = .readOnly {
+        didSet {
+            if executionMode == .editable && repositorySnapshot.state != .cleanGit {
+                executionMode = .readOnly
+                statusMessage = repositoryExplanation
+            }
+        }
+    }
+    var configurations: [AgentConfiguration] = [
+        .init(harness: .codex, model: "Not selected"),
+        .init(harness: .codex, model: "Not selected")
+    ]
+    var lanes: [LanePresentation] = []
+    var reviewMode: RunPresentation = .sideBySide
+    var isRevealOn = false
+    var winningLaneID: UUID?
+    var reviewNote = ""
+    var history: [HistoryPresentation] = []
+    var selectedHistoryID: UUID?
+    var presets: [Preset] = []
+    var timeoutMinutes = 30 { didSet { updateTimeouts() } }
+    var usesNoTimeout = false { didSet { updateTimeouts() } }
+    var notifyOnCompletion = false
+    var diagnostics: [HarnessDiagnostic] = []
+    var statusMessage = "Discovering local harnesses…"
+    var isBackgroundRunActive = false
+    var worktreeMessage: String?
+    var isDemoMode = false
+    var discoverySettings: DiscoverySettings
+    var customCodexModel = ""
+    var customOpenCodeModel = ""
+    var repositorySnapshot: RepositorySnapshot
+    var deletionPreview: HistoryDeletionPreview?
+    var isShowingDeletionConfirmation = false
+    var deleteAllPreviews: [HistoryDeletionPreview] = []
+    var isShowingDeleteAllConfirmation = false
+    var isShowingExportWarning = false
+    var isShowingRawEvidence = false
+    var rawEvidenceTitle = "Raw events"
+    var rawEvidenceText = ""
+    var pendingRunAgain: BenchmarkRun?
+    var isShowingRunAgainConfirmation = false
+    var historyTitleRename = ""
+    var historyTitleRunID: UUID?
+    var isShowingHistoryTitleRename = false
+
+    private let applicationSupport: URL
+    private let historyStore: SQLiteHistoryStore?
+    private let evidenceStore: EvidenceStore?
+    private let repository = RepositoryService()
+    private let worktrees: EditableWorktreeService?
+    private let preparation: (any AttemptPreparationService)?
+    private let exportService = ExportService()
+    private var discovery: DiscoveryService
+    private var coordinator: RunCoordinator?
+    private var updateTask: Task<Void, Never>?
+    private var activeRunID: UUID?
+    private var activeRun: BenchmarkRun?
+    private var historyRuns: [UUID: BenchmarkRun] = [:]
+    private var worktreeRecords: [UUID: WorktreeRecord] = [:]
+    private var worktreeDiffs: [UUID: String] = [:]
+    private var attemptIDsByLane: [UUID: UUID] = [:]
+    private var verdicts: [UUID: Verdict] = [:]
+    private var pendingExportRunID: UUID?
+    private var pendingExportDestination: URL?
+    private var pendingExportIsBundle = false
+
+    init(automaticallyRunsDemo: Bool = true) {
+        directory = FileManager.default.currentDirectoryPath
+        repositorySnapshot = RepositorySnapshot(state: .missing, inspectedDirectory: FileManager.default.currentDirectoryPath)
+        let supportDirectory = Self.applicationSupportDirectory()
+        let initialSettings = Self.loadDiscoverySettings()
+        applicationSupport = supportDirectory
+        discoverySettings = initialSettings
+
+        do {
+            try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+            let history = try SQLiteHistoryStore(databaseURL: supportDirectory.appending(path: "History.sqlite"))
+            let evidence = try EvidenceStore(rootDirectory: supportDirectory.appending(path: "Evidence", directoryHint: .isDirectory))
+            let editableWorktrees = try EditableWorktreeService(repository: repository, ownedRoot: supportDirectory.appending(path: "Worktrees", directoryHint: .isDirectory))
+            historyStore = history
+            evidenceStore = evidence
+            worktrees = editableWorktrees
+            preparation = RepositoryAttemptPreparationService(repository: repository, worktrees: editableWorktrees)
+        } catch {
+            historyStore = nil
+            evidenceStore = nil
+            worktrees = nil
+            preparation = nil
+            statusMessage = "Local storage is unavailable: \(error.localizedDescription)"
+        }
+
+        discovery = Self.makeDiscovery(settings: initialSettings, cacheURL: supportDirectory.appending(path: "model-catalog.json"))
+        rebuildCoordinator()
+        Task {
+            await loadPersistedState()
+            await refreshRepository()
+            if CommandLine.arguments.contains("--provider-free-demo") {
+                loadProviderFreeDemo()
+                if automaticallyRunsDemo {
+                    await startRun(prompt: prompt, directory: directory, mode: executionMode, configurations: configurations)
+                }
+            } else {
+                await refreshDiscovery()
+            }
+        }
+    }
+
+    var canRun: Bool {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (2...6).contains(configurations.count),
+              !isBackgroundRunActive else { return false }
+        if isDemoMode { return configurations.allSatisfy { $0.harness == .fake } }
+        return configurations.allSatisfy { configuration in
+            configuration.harness != .fake && catalog(for: configuration.harness).contains { $0.nativeModelID == configuration.model }
+        }
+    }
+
+    var selectedHistory: HistoryPresentation? { history.first(where: { $0.id == selectedHistoryID }) }
+    func hasVerdict(for runID: UUID) -> Bool { verdicts[runID] != nil }
+    var canUseEditable: Bool { repositorySnapshot.state == .cleanGit }
+    var repositoryExplanation: String {
+        switch repositorySnapshot.state {
+        case .cleanGit: return "Clean Git repository at \(repositorySnapshot.repositoryRoot ?? repositorySnapshot.inspectedDirectory)."
+        case .dirtyGit: return "This Git working tree has changes. Use read-only, or commit/stash changes before editable lanes."
+        case .nonGit: return "This directory is not a Git repository. Use read-only lanes."
+        case .missing: return "This directory does not exist. Choose an existing directory, then use read-only or clean Git editable lanes."
+        }
+    }
+    var menuBarIcon: String {
+        if lanes.contains(where: { $0.state == .waitingForApproval }) { return "hand.raised.circle.fill" }
+        if isBackgroundRunActive { return "bolt.circle.fill" }
+        return "checkmark.circle"
+    }
+    var menuBarLabel: String {
+        if lanes.contains(where: { $0.state == .waitingForApproval }) { return "Approval needed" }
+        if isBackgroundRunActive { return "Lanes running" }
+        return "Idle"
+    }
+
+    func catalog(for harness: HarnessKind) -> [ModelCatalogEntry] {
+        if harness == .fake { return [] }
+        // Reading this cached settings value does not trigger discovery or a harness process.
+        return discoverySettings.cachedCatalog.filter { $0.harness == harness && $0.availability == .available }
+            + discoverySettings.customModels.filter { $0.harness == harness }
+    }
+
+    func models(for harness: HarnessKind) -> [String] {
+        let values = catalog(for: harness).map(\.nativeModelID)
+        return values.isEmpty ? ["Not selected"] : values
+    }
+
+    func reasoningValues(for configuration: AgentConfiguration) -> [String] {
+        guard let model = catalog(for: configuration.harness).first(where: { $0.nativeModelID == configuration.model }) else { return ["Default"] }
+        return ["Default"] + model.nativeReasoningValues
+    }
+
+    func addConfiguration() {
+        guard configurations.count < 6 else { return }
+        let harness: HarnessKind = isDemoMode ? .fake : .codex
+        let model = isDemoMode ? "Provider-free sample" : models(for: harness).first ?? "Not selected"
+        configurations.append(.init(harness: harness, model: model, timeoutSeconds: usesNoTimeout ? nil : TimeInterval(timeoutMinutes * 60)))
+        statusMessage = "Added lane \(configurations.count)"
+    }
+
+    func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Use Directory"
+        if panel.runModal() == .OK, let url = panel.url {
+            directory = url.path
+            statusMessage = "Working directory selected"
+            Task { await refreshRepository() }
+        }
+    }
+
+    func removeConfiguration(_ id: UUID) {
+        guard configurations.count > 2 else { return }
+        configurations.removeAll { $0.id == id }
+    }
+
+    func normalizeConfiguration(_ id: UUID) {
+        guard let index = configurations.firstIndex(where: { $0.id == id }) else { return }
+        let harness = configurations[index].harness
+        let options = models(for: harness)
+        if !options.contains(configurations[index].model) { configurations[index].model = options.first ?? "Not selected" }
+        let reasoning = reasoningValues(for: configurations[index])
+        if let current = configurations[index].reasoning, !reasoning.contains(current) { configurations[index].reasoning = nil }
+    }
+
+    func start(prompt: String, directory: String, mode: ExecutionMode, configurations: [AgentConfiguration]) {
+        guard canRun else {
+            statusMessage = isDemoMode ? "Choose two provider-free demo lanes and enter a prompt." : "Select discovered native models for every lane before running."
+            return
+        }
+        Task { await startRun(prompt: prompt, directory: directory, mode: mode, configurations: configurations) }
+    }
+
+    private func startRun(prompt: String, directory: String, mode: ExecutionMode, configurations: [AgentConfiguration]) async {
+        guard let coordinator else { statusMessage = "JBench could not open its local database. Restart after fixing Application Support permissions."; return }
+        do {
+            let snapshot = try await repository.inspect(directory: URL(filePath: directory))
+            let sourceCommit: String?
+            if mode == .editable {
+                let context = try await repository.prepareEditableRun(directory: URL(filePath: directory))
+                sourceCommit = context.sourceCommit
+            } else {
+                sourceCommit = snapshot.headCommit
+            }
+            let versions = Dictionary(uniqueKeysWithValues: diagnostics.compactMap { diagnostic in
+                diagnostic.version == "Version unavailable" ? nil : (diagnostic.harness, diagnostic.version)
+            })
+            let protocols: [HarnessKind: String] = [
+                .codex: "app-server JSON-RPC contract v1",
+                .openCode: "HTTP/SSE v1.18.18 envelope contract",
+                .fake: "provider-free fixture contract v1"
+            ]
+            let draft = RunDraft(title: runTitle.nilIfEmpty, prompt: prompt, directoryPath: directory, repositoryState: snapshot.state, sourceCommit: sourceCommit, executionMode: mode, harnessVersions: versions, integrationProtocolVersions: protocols, configurations: configurations)
+            statusMessage = isDemoMode ? "Running provider-free demo lanes" : "Starting \(configurations.count) local harness lanes"
+            let run = try await coordinator.start(draft)
+            activeRunID = run.id
+            activeRun = run
+            lanes = presentation(for: run)
+            isBackgroundRunActive = true
+            section = .newRun
+        } catch {
+            statusMessage = actionable(error)
+        }
+    }
+
+    func cancel(laneID: UUID) {
+        guard let run = activeRun ?? historyRun(id: activeRunID),
+              let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
+        Task { await coordinator?.cancel(attemptID: attempt.id) }
+    }
+
+    func retry(laneID: UUID) {
+        guard let run = activeRun ?? historyRun(id: activeRunID), let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
+        Task {
+            do { _ = try await coordinator?.retry(failedAttemptID: attempt.id) }
+            catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func reply(_ reply: ApprovalReply, laneID: UUID) {
+        guard let run = activeRun, let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
+        Task {
+            do { try await coordinator?.reply(reply, attemptID: attempt.id) }
+            catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func savePreset() {
+        let name = "Custom \(presets.count + 1)"
+        Task {
+            do {
+                let preset = try Preset(name: name, agents: configurations)
+                try await historyStore?.savePreset(preset)
+                presets.insert(preset, at: 0)
+                statusMessage = "Saved \(name)"
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func applyPreset(_ preset: Preset) {
+        configurations = preset.agents
+        isDemoMode = configurations.allSatisfy { $0.harness == .fake }
+        section = .newRun
+        statusMessage = "Loaded \(preset.name)"
+    }
+
+    func deletePreset(_ preset: Preset) {
+        Task {
+            do { try await historyStore?.deletePreset(id: preset.id); presets.removeAll { $0.id == preset.id }; statusMessage = "Deleted \(preset.name)" }
+            catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func renamePreset(_ preset: Preset, to name: String) {
+        Task {
+            do {
+                let renamed = try Preset(id: preset.id, name: name, agents: preset.agents, createdAt: preset.createdAt)
+                try await historyStore?.savePreset(renamed)
+                if let index = presets.firstIndex(where: { $0.id == preset.id }) { presets[index] = renamed }
+                statusMessage = "Renamed preset to \(renamed.name)"
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func replacePreset(_ preset: Preset) {
+        Task {
+            do {
+                let updated = try Preset(id: preset.id, name: preset.name, agents: configurations, createdAt: preset.createdAt)
+                try await historyStore?.savePreset(updated)
+                if let index = presets.firstIndex(where: { $0.id == preset.id }) { presets[index] = updated }
+                statusMessage = "Updated \(preset.name)"
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func movePresets(from source: IndexSet, to destination: Int) {
+        presets.move(fromOffsets: source, toOffset: destination)
+        let now = Date()
+        Task {
+            for index in presets.indices {
+                presets[index].updatedAt = now.addingTimeInterval(-Double(index))
+                try? await historyStore?.savePreset(presets[index])
+            }
+            statusMessage = "Reordered presets"
+        }
+    }
+
+    func movePreset(_ preset: Preset, by offset: Int) {
+        guard let index = presets.firstIndex(where: { $0.id == preset.id }) else { return }
+        let destination = index + offset
+        guard presets.indices.contains(destination) else { return }
+        presets.swapAt(index, destination)
+        let now = Date()
+        Task {
+            for index in presets.indices {
+                presets[index].updatedAt = now.addingTimeInterval(-Double(index))
+                try? await historyStore?.savePreset(presets[index])
+            }
+            statusMessage = "Reordered presets"
+        }
+    }
+
+    func loadProviderFreeDemo() {
+        isDemoMode = true
+        configurations = [
+            .init(harness: .fake, model: "Provider-free sample", reasoning: "Deterministic", timeoutSeconds: 30),
+            .init(harness: .fake, model: "Provider-free alternate", reasoning: "Deterministic", timeoutSeconds: 30)
+        ]
+        prompt = prompt.isEmpty ? "Summarize the operational risks in this change." : prompt
+        statusMessage = "Demo mode uses no provider, account, or harness prompt."
+    }
+
+    func refreshRepository() async {
+        do {
+            repositorySnapshot = try await repository.inspect(directory: URL(filePath: directory))
+            if executionMode == .editable && !canUseEditable { executionMode = .readOnly; statusMessage = repositoryExplanation }
+        } catch {
+            repositorySnapshot = RepositorySnapshot(state: .missing, inspectedDirectory: directory)
+            statusMessage = actionable(error)
+        }
+    }
+
+    func leaveDemoMode() {
+        isDemoMode = false
+        configurations = (0..<2).map { _ in .init(harness: .codex, model: models(for: .codex).first ?? "Not selected", timeoutSeconds: usesNoTimeout ? nil : TimeInterval(timeoutMinutes * 60)) }
+        statusMessage = "Normal mode uses discovered local harnesses."
+    }
+
+    func saveManualVerdict() {
+        guard let winningLaneID else { statusMessage = "Select a winner first"; return }
+        let targetID = section == .history ? selectedHistoryID : activeRun?.id
+        guard let targetID else { statusMessage = "No run is selected for this verdict."; return }
+        Task {
+            do {
+                guard let run = try await coordinator?.run(id: targetID) else { statusMessage = "Could not load the selected run."; return }
+                let verdict = Verdict(runID: run.id, winningAgentRunID: winningLaneID, note: reviewNote.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
+                try await historyStore?.saveVerdict(verdict)
+                verdicts[run.id] = verdict
+                isRevealOn = true
+                statusMessage = "Manual verdict saved"
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    var canRevealIdentities: Bool {
+        let targetID = section == .history ? selectedHistoryID : activeRun?.id
+        guard let targetID else { return false }
+        return verdicts[targetID] != nil
+    }
+
+    func skipManualVerdict() {
+        let targetID = section == .history ? selectedHistoryID : activeRun?.id
+        guard let targetID else { statusMessage = "No run is selected."; return }
+        Task {
+            do {
+                let note = reviewNote.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                let verdict = Verdict(runID: targetID, winningAgentRunID: nil, note: note)
+                try await historyStore?.saveVerdict(verdict)
+                verdicts[targetID] = verdict
+                winningLaneID = nil
+                isRevealOn = true
+                statusMessage = "Verdict skipped. Identities revealed."
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func loadVerdictForSelectedHistory() {
+        guard let id = selectedHistoryID else { return }
+        let verdict = verdicts[id]
+        winningLaneID = verdict?.winningAgentRunID
+        reviewNote = verdict?.note ?? ""
+    }
+
+    func prepareHistoryDeletion(_ runID: UUID) {
+        Task {
+            do {
+                guard let preview = try await historyStore?.deletionPreview(for: runID) else { statusMessage = "This history record no longer exists."; return }
+                guard preview.canDelete else { statusMessage = preview.refusalReason ?? "Resolve pending worktrees before deleting history."; return }
+                deletionPreview = preview
+                isShowingDeletionConfirmation = true
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    var deletionImpact: String {
+        guard let preview = deletionPreview else { return "" }
+        let worktrees = preview.worktrees.map { "\($0.disposition.rawValue): \($0.ownedWorktreePath)" }.joined(separator: "\n")
+        return "Record: \(preview.title)\nEvidence files: \(preview.evidenceFiles.count)\nWorktrees:\n\(worktrees.isEmpty ? "None" : worktrees)\nTransferred worktrees are never deleted."
+    }
+
+    var deleteAllImpact: String {
+        let evidenceCount = deleteAllPreviews.reduce(0) { $0 + $1.evidenceFiles.count }
+        let transferredCount = deleteAllPreviews.reduce(0) { $0 + $1.transferredWorktrees.count }
+        return "Records: \(deleteAllPreviews.count)\nEvidence files: \(evidenceCount)\nTransferred worktrees preserved: \(transferredCount)\nPending worktrees block this action."
+    }
+
+    func prepareDeleteAllHistory() {
+        Task {
+            do {
+                let previews = try await historyStore?.deletionPreviews() ?? []
+                guard !previews.isEmpty else { statusMessage = "History is already empty."; return }
+                if let blocked = previews.first(where: { !$0.canDelete }) {
+                    statusMessage = blocked.refusalReason ?? "Resolve pending worktrees before deleting history."
+                    return
+                }
+                deleteAllPreviews = previews
+                isShowingDeleteAllConfirmation = true
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func confirmDeleteAllHistory(deleteEvidence: Bool) {
+        let ids = Set(deleteAllPreviews.map(\.runID))
+        guard !ids.isEmpty else { return }
+        Task {
+            do {
+                try await historyStore?.deleteAll(confirmation: .init(runIDs: ids, deleteEvidence: deleteEvidence), evidenceStore: evidenceStore)
+                history.removeAll { ids.contains($0.id) }
+                for id in ids { verdicts[id] = nil; historyRuns[id] = nil }
+                selectedHistoryID = history.first?.id
+                deleteAllPreviews = []
+                statusMessage = deleteEvidence ? "Deleted all history records and evidence." : "Deleted all history records. Evidence remains on disk."
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func confirmHistoryDeletion(deleteEvidence: Bool) {
+        guard let preview = deletionPreview else { return }
+        Task {
+            do {
+                try await historyStore?.deleteRun(id: preview.runID, confirmation: .init(runIDs: [preview.runID], deleteEvidence: deleteEvidence), evidenceStore: evidenceStore)
+                history.removeAll { $0.id == preview.runID }
+                selectedHistoryID = history.first?.id
+                verdicts[preview.runID] = nil
+                deletionPreview = nil
+                statusMessage = deleteEvidence ? "Deleted local history record and evidence." : "Deleted local history record. Evidence remains on disk."
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func prepareRenameHistoryTitle(_ item: HistoryPresentation) {
+        historyTitleRunID = item.id
+        historyTitleRename = item.title
+        isShowingHistoryTitleRename = true
+    }
+
+    func renameHistoryTitle() {
+        guard let id = historyTitleRunID else { return }
+        let title = historyTitleRename.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { statusMessage = "Run title cannot be empty."; return }
+        Task {
+            do {
+                guard var run = try await historyStore?.run(id: id) else { statusMessage = "This history record no longer exists."; return }
+                run.title = title
+                try await historyStore?.saveRun(run)
+                if activeRun?.id == id { activeRun = run; refreshActiveLanes() }
+                await loadHistory()
+                statusMessage = "Renamed history run."
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func runAgain(_ item: HistoryPresentation) {
+        Task {
+            do {
+                guard let prior = try await historyStore?.run(id: item.id) else { statusMessage = "Could not load the selected history record."; return }
+                let current = try await repository.inspect(directory: URL(filePath: prior.directoryPath))
+                guard prior.executionMode == .editable else { applyRunAgain(prior, repository: current); return }
+                guard current.state == .cleanGit else {
+                    applyRunAgain(prior, repository: current, forceReadOnly: true)
+                    statusMessage = "The original directory is no longer clean Git. Loaded the run as read-only."
+                    return
+                }
+                if current.headCommit != prior.sourceCommit {
+                    pendingRunAgain = prior
+                    repositorySnapshot = current
+                    isShowingRunAgainConfirmation = true
+                    return
+                }
+                applyRunAgain(prior, repository: current)
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func confirmRunAgainWithCurrentCommit() {
+        guard let run = pendingRunAgain else { return }
+        pendingRunAgain = nil
+        applyRunAgain(run, repository: repositorySnapshot)
+        statusMessage = "Loaded prior run. Editable mode will record the current clean HEAD when you start."
+    }
+
+    private func applyRunAgain(_ run: BenchmarkRun, repository: RepositorySnapshot, forceReadOnly: Bool = false) {
+        prompt = run.prompt
+        runTitle = run.title
+        directory = run.directoryPath
+        repositorySnapshot = repository
+        executionMode = forceReadOnly ? .readOnly : run.executionMode
+        configurations = run.agents.sorted { $0.displayOrder < $1.displayOrder }.map(\.requested)
+        isDemoMode = configurations.allSatisfy { $0.harness == .fake }
+        section = .newRun
+    }
+
+    func exportMarkdown(for item: HistoryPresentation? = nil) { export(item: item, bundle: false) }
+    func exportEvidenceBundle(for item: HistoryPresentation? = nil) { export(item: item, bundle: true) }
+    func exportMarkdown(runID: UUID?) { export(targetID: runID, bundle: false) }
+    func exportEvidenceBundle(runID: UUID?) { export(targetID: runID, bundle: true) }
+
+    private func export(item: HistoryPresentation?, bundle: Bool) {
+        export(targetID: item?.id, bundle: bundle)
+    }
+
+    private func export(targetID: UUID?, bundle: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
+        panel.prompt = bundle ? "Export Bundle" : "Export Report"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        pendingExportRunID = targetID ?? activeRun?.id
+        pendingExportDestination = destination
+        pendingExportIsBundle = bundle
+        isShowingExportWarning = true
+    }
+
+    func confirmExport() {
+        guard let targetID = pendingExportRunID, let destination = pendingExportDestination else { return }
+        let bundle = pendingExportIsBundle
+        pendingExportRunID = nil
+        pendingExportDestination = nil
+        Task {
+            do {
+                guard let run = try await coordinator?.run(id: targetID) else { statusMessage = "No run is available to export."; return }
+                let verdict = try await historyStore?.verdict(for: run.id)
+                if bundle {
+                    let attemptIDs = Set(run.agents.flatMap(\.attempts).map(\.id))
+                    let patches = worktreeRecords.values.filter { attemptIDs.contains($0.attemptID) }.compactMap { $0.patchReference.map(URL.init(fileURLWithPath:)) }
+                    let result = try exportService.exportEvidenceBundle(run, verdict: verdict, patches: patches, to: destination)
+                    statusMessage = "Evidence bundle saved to \(result.directory.lastPathComponent)"
+                } else {
+                    let result = try exportService.exportMarkdownReport(run, verdict: verdict, to: destination)
+                    statusMessage = "Markdown report saved to \(result.lastPathComponent)"
+                }
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    func showRawEvidence(for laneID: UUID) {
+        guard let attemptID = attemptIDsByLane[laneID] else { statusMessage = "No attempt evidence is mapped to this lane."; return }
+        let runID = activeRun?.agents.contains(where: { $0.id == laneID }) == true
+            ? activeRun?.id
+            : historyRuns.values.first(where: { $0.agents.contains(where: { $0.id == laneID }) })?.id
+        guard let runID else { statusMessage = "No run evidence is mapped to this lane."; return }
+        Task {
+            do {
+                let records = try await evidenceStore?.records(runID: runID, attemptID: attemptID) ?? []
+                rawEvidenceTitle = "Raw events · \(records.count)"
+                rawEvidenceText = records.map { "[\($0.timestamp.formatted(.iso8601))] \($0.eventType)\n\($0.rawJSON)" }.joined(separator: "\n\n")
+                if rawEvidenceText.isEmpty { rawEvidenceText = "No raw events were recorded for this attempt." }
+                isShowingRawEvidence = true
+            } catch { statusMessage = actionable(error) }
+        }
+    }
+
+    var runAgainCommitMessage: String {
+        let prior = pendingRunAgain?.sourceCommit ?? "Unavailable"
+        let current = repositorySnapshot.headCommit ?? "Unavailable"
+        return "Prior source commit: \(prior)\nCurrent clean HEAD: \(current)\nThe new run will use the current commit after you confirm."
+    }
+
+    func worktreeAction(_ action: String, lane: LanePresentation) {
+        guard let attemptID = attemptIDsByLane[lane.id],
+              let record = worktreeRecords.values.first(where: { $0.attemptID == attemptID }) else {
+            worktreeMessage = "No JBench-owned worktree is recorded for this lane."
+            return
+        }
+        if action == "Keep" || action == "Discard" {
+            guard let attempt = attempt(for: lane.id), attempt.state.isTerminal else {
+                worktreeMessage = "Keep and Discard are blocked until this lane is terminal and its owned process has exited."
+                return
+            }
+            if ownedProcessIsStillRunning(attempt) {
+                worktreeMessage = "Keep and Discard are blocked while JBench still owns a running harness process."
+                return
+            }
+        }
+        switch action {
+        case "Open":
+            let path = record.transferredPath ?? record.ownedWorktreePath
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            worktreeMessage = "Opened \(path)"
+        case "Export patch": exportPatch(record)
+        case "Keep": keepWorktree(record)
+        case "Discard": discardWorktree(record)
+        default: break
+        }
+    }
+
+    func canTransferWorktree(for laneID: UUID) -> Bool {
+        guard let attempt = attempt(for: laneID), attempt.state.isTerminal else { return false }
+        return !ownedProcessIsStillRunning(attempt)
+    }
+
+    private func exportPatch(_ record: WorktreeRecord) {
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "JBench-\(record.attemptID.uuidString.prefix(8)).patch"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        Task {
+            do {
+                let result = try await worktrees?.exportPatch(for: record.id, to: destination)
+                if var updated = worktreeRecords[record.id] { updated.patchReference = result?.path; worktreeRecords[record.id] = updated; try await historyStore?.saveWorktree(updated); refreshActiveLanes() }
+                worktreeMessage = "Patch exported to \(destination.lastPathComponent)"
+            } catch { worktreeMessage = actionable(error) }
+        }
+    }
+
+    private func keepWorktree(_ record: WorktreeRecord) {
+        guard let attempt = attemptByID(record.attemptID) else { worktreeMessage = "The matching terminal attempt could not be loaded."; return }
+        let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true; panel.prompt = "Choose Parent Folder"
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        let destination = parent.appending(path: "JBench-\(record.attemptID.uuidString.prefix(8))", directoryHint: .isDirectory)
+        Task {
+            do {
+                try await worktrees?.authorizeResolution(record.id, after: attempt)
+                guard let updated = try await worktrees?.keep(record.id, at: destination) else { return }
+                worktreeRecords[updated.id] = updated; try await historyStore?.saveWorktree(updated); refreshActiveLanes()
+                worktreeMessage = "Worktree transferred to \(destination.path)"
+            } catch { worktreeMessage = actionable(error) }
+        }
+    }
+
+    private func discardWorktree(_ record: WorktreeRecord) {
+        guard let attempt = attemptByID(record.attemptID) else { worktreeMessage = "The matching terminal attempt could not be loaded."; return }
+        Task {
+            do {
+                try await worktrees?.authorizeResolution(record.id, after: attempt)
+                guard let updated = try await worktrees?.discard(record.id) else { return }
+                worktreeRecords[updated.id] = updated; try await historyStore?.saveWorktree(updated); refreshActiveLanes()
+                worktreeMessage = "Discarded JBench-owned worktree."
+            } catch { worktreeMessage = actionable(error) }
+        }
+    }
+
+    func refreshDiscovery() async {
+        guard !isBackgroundRunActive else { statusMessage = "Discovery waits until active lanes finish."; return }
+        statusMessage = "Refreshing local harness discovery…"
+        diagnostics = await discovery.discover()
+            .map { HarnessDiagnostic(id: UUID(), harness: $0.harness, path: $0.executablePath, version: $0.version ?? "Version unavailable", status: $0.authenticationStatus, discovery: $0.diagnosticMessage ?? "Native models discovered") }
+        discoverySettings = await discovery.settings
+        Self.saveDiscoverySettings(discoverySettings)
+        rebuildCoordinator()
+        normalizeAllConfigurations()
+        let ready = diagnostics.filter { $0.status == .ready }.count
+        statusMessage = ready > 0 ? "Discovered \(ready) local harness\(ready == 1 ? "" : "es")." : "No ready local harness was found. Add an executable override in Settings."
+    }
+
+    func updateExecutableOverride(_ path: String, for harness: HarnessKind) {
+        let value = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { discoverySettings.executableOverrides[harness] = nil } else { discoverySettings.executableOverrides[harness] = value }
+        Self.saveDiscoverySettings(discoverySettings)
+        discovery = Self.makeDiscovery(settings: discoverySettings, cacheURL: applicationSupport.appending(path: "model-catalog.json"))
+        Task { await refreshDiscovery() }
+    }
+
+    func addCustomModel(for harness: HarnessKind) {
+        let value = (harness == .codex ? customCodexModel : customOpenCodeModel).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { statusMessage = "Enter the harness-native model ID first."; return }
+        guard !catalog(for: harness).contains(where: { $0.nativeModelID == value }) else { statusMessage = "That model is already listed."; return }
+        discoverySettings.customModels.append(.init(harness: harness, nativeModelID: value, discoverySource: "Owner custom fallback", availability: .customNotVerified))
+        Self.saveDiscoverySettings(discoverySettings)
+        let settings = discoverySettings
+        Task {
+            try? await discovery.updateSettings(settings)
+            statusMessage = "Added custom \(harness == .codex ? "Codex" : "OpenCode") model. It remains unverified until a run observes it."
+        }
+        if harness == .codex { customCodexModel = "" } else { customOpenCodeModel = "" }
+    }
+
+    func setNotificationsEnabled(_ enabled: Bool) {
+        notifyOnCompletion = enabled
+        guard enabled else { return }
+        Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+    }
+
+    func shutdownForTermination() async -> String {
+        updateTask?.cancel()
+        guard let coordinator else {
+            statusMessage = "Shutdown complete: no active local coordinator."
+            return statusMessage
+        }
+        let report = await coordinator.shutdown()
+        let incomplete = report.diagnostics.filter { !$0.protocolShutdownCompleted }
+        statusMessage = incomplete.isEmpty
+            ? "Shutdown complete: \(report.diagnostics.count) owned lane process\(report.diagnostics.count == 1 ? "" : "es") stopped."
+            : "Shutdown complete with \(incomplete.count) incomplete owned-process diagnostic\(incomplete.count == 1 ? "" : "s")."
+        return statusMessage
+    }
+
+    private func rebuildCoordinator() {
+        guard let historyStore, let evidenceStore else { return }
+        let resolver = ExecutableResolver()
+        var adapters: [any HarnessAdapter] = [FakeHarnessAdapter(plans: [
+            "Provider-free sample": .successful(response: "Provider-free demo output. No local Codex or OpenCode prompt was run."),
+            "Provider-free alternate": .successful(response: "Second provider-free demo output for comparison. No account or provider was used.")
+        ])]
+        if let codex = resolver.resolve(harness: .codex, override: discoverySettings.executableOverrides[.codex]) {
+            adapters.append(CodexAppServerAdapter(executableURL: codex.url))
+        }
+        if let openCode = resolver.resolve(harness: .openCode, override: discoverySettings.executableOverrides[.openCode]) {
+            // This remains false until a future version-specific restriction + sentinel diagnostic is implemented.
+            adapters.append(OpenCodeAdapter(executablePath: openCode.url.path, supportsVerifiedReadOnly: false))
+        }
+        coordinator = RunCoordinator(adapters: adapters, history: historyStore, evidence: evidenceStore, preparation: preparation ?? PassthroughAttemptPreparationService())
+        subscribeToUpdates()
+    }
+
+    private func subscribeToUpdates() {
+        updateTask?.cancel()
+        guard let coordinator else { return }
+        updateTask = Task { [weak self] in
+            let stream = await coordinator.updates()
+            for await update in stream {
+                guard !Task.isCancelled else { return }
+                await self?.receive(update, coordinator: coordinator)
+            }
+        }
+    }
+
+    private func receive(_ update: RunUpdate, coordinator: RunCoordinator) async {
+        switch update {
+        case .runCreated(let run):
+            activeRunID = run.id; activeRun = run; lanes = presentation(for: run)
+        case .attemptChanged(let id, _, _):
+            if let refreshed = try? await coordinator.run(id: id) {
+                activeRun = refreshed
+                await collectTerminalWorktreeChanges(for: refreshed)
+                if activeRunID == id { lanes = presentation(for: refreshed) }
+                if refreshed.endedAt != nil { await finish(run: refreshed) }
+            }
+        case .runFinished(let run):
+            activeRun = run
+            if activeRunID == run.id { lanes = presentation(for: run) }
+            await finish(run: run)
+        case .lifecycleChanged(let snapshot):
+            if let record = snapshot.metadata.worktree { worktreeRecords[record.id] = record; refreshActiveLanes() }
+        case .approvalNeeded(let runID, let agentRunID, _, let approval):
+            guard runID == activeRunID, let index = lanes.firstIndex(where: { $0.id == agentRunID }) else { return }
+            lanes[index].approval = approval
+            statusMessage = "Approval needed for lane \((lanes.firstIndex(where: { $0.id == agentRunID }) ?? 0) + 1)"
+            if notifyOnCompletion { notifyApproval(approval, lane: index + 1) }
+        case .diagnostic(let detail): statusMessage = detail
+        }
+    }
+
+    private func finish(run: BenchmarkRun) async {
+        await collectTerminalWorktreeChanges(for: run)
+        isBackgroundRunActive = false
+        statusMessage = "\(run.agents.count) lanes \(run.state == .completed ? "completed" : "finished with \(run.state.rawValue)")"
+        await loadHistory()
+        if notifyOnCompletion { notifyCompletion(for: run) }
+    }
+
+    private func loadPersistedState() async {
+        await loadHistory()
+        if let stored = try? await historyStore?.presets() { presets = stored }
+    }
+
+    private func loadHistory() async {
+        guard let runs = try? await historyStore?.search() else { return }
+        historyRuns = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, $0) })
+        for run in runs {
+            if let verdict = try? await historyStore?.verdict(for: run.id) { verdicts[run.id] = verdict }
+            if let records = try? await historyStore?.worktrees(for: run.id) {
+                for record in records {
+                    worktreeRecords[record.id] = record
+                    guard record.disposition == .pending else { continue }
+                    do {
+                        try await worktrees?.restore(record)
+                        await collectChanges(for: record)
+                    } catch {
+                        statusMessage = "Worktree restore rejected for \(record.ownedWorktreePath): \(actionable(error))"
+                    }
+                }
+            }
+        }
+        history = runs.map { run in HistoryPresentation(id: run.id, title: run.title, date: run.createdAt, state: run.state, directory: run.directoryPath, mode: run.executionMode, lanes: presentation(for: run), prompt: run.prompt) }
+        if selectedHistoryID == nil { selectedHistoryID = history.first?.id }
+        loadVerdictForSelectedHistory()
+    }
+
+    private func historyRun(id: UUID?) -> BenchmarkRun? {
+        guard let id, let item = history.first(where: { $0.id == id }) else { return nil }
+        // HistoryPresentation intentionally keeps only display data. Active runs are in memory;
+        // actions on older runs are limited to viewing/exporting and therefore do not need a coordinator call.
+        return activeRun?.id == item.id ? activeRun : nil
+    }
+
+    private func refreshActiveLanes() {
+        if let activeRun { lanes = presentation(for: activeRun) }
+    }
+
+    private func presentation(for run: BenchmarkRun) -> [LanePresentation] {
+        run.agents.sorted { $0.displayOrder < $1.displayOrder }.map { agent in
+            let attempt = agent.attempts.last
+            if let attempt { attemptIDsByLane[agent.id] = attempt.id }
+            let worktree = attempt.flatMap { attempt in worktreeRecords.values.first(where: { $0.attemptID == attempt.id }) }
+            return LanePresentation(
+                id: agent.id,
+                configuration: agent.requested,
+                state: agent.state,
+                activity: activity(for: attempt),
+                output: attempt?.finalResponse ?? "",
+                observedModel: attempt?.observed.model.value,
+                observedReasoning: attempt?.observed.reasoning.value,
+                elapsed: measured(attempt?.metrics.elapsedSeconds, provenance: attempt?.metrics.elapsedProvenance),
+                tokens: tokenText(attempt?.metrics),
+                cost: costText(attempt?.metrics),
+                worktree: worktree.map { WorktreePresentation(path: $0.transferredPath ?? $0.ownedWorktreePath, changedFiles: $0.changedFileCount ?? 0, status: $0.disposition.rawValue, diff: worktreeDiffs[$0.id] ?? "") },
+                blindReviewOrder: agent.blindReviewOrder ?? agent.displayOrder
+            )
+        }
+    }
+
+    private func collectTerminalWorktreeChanges(for run: BenchmarkRun) async {
+        for attempt in run.agents.flatMap(\.attempts) where attempt.state.isTerminal {
+            guard let record = worktreeRecords.values.first(where: { $0.attemptID == attempt.id }), record.disposition == .pending else { continue }
+            await collectChanges(for: record)
+        }
+        refreshActiveLanes()
+    }
+
+    private func collectChanges(for record: WorktreeRecord) async {
+        do {
+            guard let changes = try await worktrees?.collectChanges(for: record.id) else { return }
+            var updated = record
+            updated.changedFileCount = changes.files.count
+            worktreeRecords[record.id] = updated
+            worktreeDiffs[record.id] = String(decoding: changes.patch, as: UTF8.self)
+            try await historyStore?.saveWorktree(updated)
+        } catch {
+            statusMessage = "Could not inspect worktree changes: \(actionable(error))"
+        }
+    }
+
+    private func activity(for attempt: AgentAttempt?) -> String {
+        guard let attempt else { return "Queued" }
+        if let error = attempt.errorMessage { return error }
+        if let cancellation = attempt.cancellationDetail { return cancellation }
+        switch attempt.state {
+        case .queued: return "Queued"
+        case .starting: return "Starting local harness…"
+        case .running: return attempt.finalResponse.isEmpty ? "Running…" : "Streaming response…"
+        case .waitingForApproval: return "Waiting for your approval"
+        case .completed: return "Response complete"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled by you"
+        case .timedOut: return "Timed out"
+        case .interrupted: return "Interrupted"
+        }
+    }
+
+    private func attempt(for laneID: UUID) -> AgentAttempt? {
+        guard let attemptID = attemptIDsByLane[laneID] else { return nil }
+        if let active = activeRun?.agents.flatMap(\.attempts).first(where: { $0.id == attemptID }) { return active }
+        return historyRuns.values.flatMap(\.agents).flatMap(\.attempts).first(where: { $0.id == attemptID })
+    }
+
+    private func attemptByID(_ id: UUID) -> AgentAttempt? {
+        if let active = activeRun?.agents.flatMap(\.attempts).first(where: { $0.id == id }) { return active }
+        return historyRuns.values.lazy.flatMap(\.agents).flatMap(\.attempts).first(where: { $0.id == id })
+    }
+
+    private func ownedProcessIsStillRunning(_ attempt: AgentAttempt) -> Bool {
+        let owned = attempt.ownership
+        return identityStillMatches(pid: owned.processID, serialized: owned.processIdentity)
+            || identityStillMatches(pid: owned.serverProcessID, serialized: owned.serverIdentity)
+    }
+
+    private func identityStillMatches(pid: Int32?, serialized: String) -> Bool {
+        guard let pid, pid > 0, let current = OwnedProcessService.identity(for: pid) else { return false }
+        return serialized.isEmpty || current.serialized == serialized
+    }
+
+    private func measured(_ value: Double?, provenance: MetricProvenance?) -> String {
+        guard let value, provenance != .unavailable else { return "Unavailable" }
+        return String(format: "%.1fs", value)
+    }
+    private func tokenText(_ metrics: AttemptMetrics?) -> String {
+        guard let metrics, metrics.tokenProvenance != .unavailable else { return "Unavailable" }
+        return [metrics.inputTokens, metrics.outputTokens].compactMap { $0 }.map(String.init).joined(separator: " + ")
+    }
+    private func costText(_ metrics: AttemptMetrics?) -> String {
+        guard let cost = metrics?.cost, metrics?.costProvenance != .unavailable else { return "Unavailable" }
+        return "\(cost)"
+    }
+    private func updateTimeouts() { for index in configurations.indices { configurations[index].timeoutSeconds = usesNoTimeout ? nil : TimeInterval(timeoutMinutes * 60) } }
+    private func normalizeAllConfigurations() { for configuration in configurations { normalizeConfiguration(configuration.id) } }
+    private func actionable(_ error: Error) -> String { error.localizedDescription.isEmpty ? "The local operation failed. Check Settings for the harness path and diagnostics." : error.localizedDescription }
+
+    private func notifyCompletion(for run: BenchmarkRun) {
+        let content = UNMutableNotificationContent(); content.title = "JBench run finished"; content.body = "\(run.agents.count) lanes: \(run.state.rawValue)."; content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: run.id.uuidString, content: content, trigger: nil))
+    }
+
+    private func notifyApproval(_ approval: ApprovalRequest, lane: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "JBench approval needed"
+        content.body = "Lane \(lane): \(approval.summary)"
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "approval-\(approval.id.uuidString)", content: content, trigger: nil))
+    }
+
+    private static func applicationSupportDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL(filePath: NSTemporaryDirectory())
+        return base.appending(path: "JBench", directoryHint: .isDirectory)
+    }
+    private static func makeDiscovery(settings: DiscoverySettings, cacheURL: URL) -> DiscoveryService {
+        let codex = CodexAppServerAdapter()
+        let openCode = OpenCodeAdapter()
+        return DiscoveryService(settings: settings, adapters: [.codex: codex, .openCode: openCode], cacheURL: cacheURL)
+    }
+    private static func loadDiscoverySettings() -> DiscoverySettings {
+        guard let data = UserDefaults.standard.data(forKey: "JBench.discoverySettings"), let settings = try? JSONDecoder().decode(DiscoverySettings.self, from: data) else { return .init() }
+        return settings
+    }
+    private static func saveDiscoverySettings(_ settings: DiscoverySettings) { UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: "JBench.discoverySettings") }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}

@@ -14,6 +14,8 @@ public actor CodexAppServerAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
     private let executableURL: URL
     private let clientName: String
     private let clientVersion: String
+    /// Test-only seam for proving that process termination never races queued stdout.
+    private let stdoutProcessingDelay: Duration
     private var sessions: [UUID: AttemptSession] = [:]
 
     public init(
@@ -21,9 +23,24 @@ public actor CodexAppServerAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         clientName: String = "JBench",
         clientVersion: String = "1.0"
     ) {
+        self.init(
+            executableURL: executableURL,
+            clientName: clientName,
+            clientVersion: clientVersion,
+            stdoutProcessingDelay: .zero
+        )
+    }
+
+    init(
+        executableURL: URL,
+        clientName: String,
+        clientVersion: String,
+        stdoutProcessingDelay: Duration
+    ) {
         self.executableURL = executableURL
         self.clientName = clientName
         self.clientVersion = clientVersion
+        self.stdoutProcessingDelay = stdoutProcessingDelay
     }
 
     public func events(for request: HarnessRequest) async -> AsyncThrowingStream<AdapterEvent, Error> {
@@ -147,10 +164,11 @@ public actor CodexAppServerAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         )
         sessions[request.attemptID] = session
 
-        standardOutput.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { await self?.receive(data: data, attemptID: request.attemptID) }
+        standardOutput.fileHandleForReading.readabilityHandler = { [weak self, weak session] handle in
+            guard let session, session.captureStdout(from: handle) else { return }
+            Task { [weak self] in
+                await self?.drainStdoutAfterConfiguredDelay(attemptID: request.attemptID)
+            }
         }
         standardError.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -181,8 +199,17 @@ public actor CodexAppServerAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         }
     }
 
-    private func receive(data: Data, attemptID: UUID) {
+    private func drainStdoutAfterConfiguredDelay(attemptID: UUID) async {
+        if stdoutProcessingDelay > .zero {
+            try? await Task.sleep(for: stdoutProcessingDelay)
+        }
+        drainStdout(attemptID: attemptID)
+    }
+
+    private func drainStdout(attemptID: UUID) {
         guard let session = sessions[attemptID], !session.finished else { return }
+        let data = session.takePendingStdout()
+        guard !data.isEmpty else { return }
         session.stdoutBuffer.append(data)
         while let newline = session.stdoutBuffer.firstIndex(of: 0x0A) {
             let lineData = session.stdoutBuffer.prefix(upTo: newline)
@@ -253,6 +280,16 @@ public actor CodexAppServerAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
 
     private func handleNotification(method: String, root: [String: Any], rawJSON: String, session: AttemptSession) {
         if let nativeID = CodexWireJSON.requestID(root["id"]), CodexWireDecoder.isApprovalRequest(method: method) {
+            if let decision = CodexWireRequest.automaticApprovalDecision(for: session.request.configuration.approvalPolicy) {
+                do {
+                    try send(.response(id: nativeID, result: ["decision": decision]), to: session)
+                    session.continuation.yield(.init(kind: .activity, text: "Approved for this attempt.", rawJSON: rawJSON))
+                } catch {
+                    session.continuation.yield(.init(kind: .failed, text: "Could not reply to Codex approval request: \(error.localizedDescription)", rawJSON: rawJSON))
+                    finish(session: session, error: nil, terminateAfterGrace: true)
+                }
+                return
+            }
             let request = CodexWireDecoder.approval(from: root)
             session.nativeApprovalIDs[request.id] = nativeID
             session.continuation.yield(.init(kind: .approvalRequest, approval: request, rawJSON: rawJSON))
@@ -301,9 +338,18 @@ public actor CodexAppServerAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         }
     }
 
-    private func processTerminated(attemptID: UUID, status: Int32) {
+    private func processTerminated(attemptID: UUID, status: Int32) async {
         guard let session = sessions[attemptID] else { return }
         session.stdoutHandlerOff()
+        if let output = session.process.standardOutput as? Pipe {
+            session.stopAndCaptureRemainingStdout(from: output.fileHandleForReading)
+        } else {
+            session.stopCapturingStdout()
+        }
+        // The process cannot produce more stdout after termination. Capture every
+        // remaining byte first, then decode the ordered buffer before classifying
+        // an otherwise unexplained exit as a failure.
+        drainStdout(attemptID: attemptID)
         if !session.finished {
             let detail = "Codex app-server ended with status \(status)."
             session.continuation.finish(throwing: JBenchCoreError.storage(detail))
@@ -342,6 +388,10 @@ private final class AttemptSession: @unchecked Sendable {
     var nativeApprovalIDs: [UUID: CodexRequestID] = [:]
     var requestCounter = 3
     var finished = false
+    private let stdoutLock = NSLock()
+    private var pendingStdout = Data()
+    private var stdoutDrainScheduled = false
+    private var stdoutCaptureStopped = false
 
     init(attemptID: UUID, request: HarnessRequest, process: Process, input: FileHandle, continuation: AsyncThrowingStream<AdapterEvent, Error>.Continuation) {
         self.attemptID = attemptID; self.request = request; self.process = process; self.input = input; self.continuation = continuation
@@ -355,6 +405,46 @@ private final class AttemptSession: @unchecked Sendable {
     func stdoutHandlerOff() {
         if let output = process.standardOutput as? Pipe { output.fileHandleForReading.readabilityHandler = nil }
         if let error = process.standardError as? Pipe { error.fileHandleForReading.readabilityHandler = nil }
+    }
+
+    /// Captures output before scheduling actor work. The lock covers the pipe read
+    /// so termination cannot close capture between the native read and enqueue.
+    func captureStdout(from handle: FileHandle) -> Bool {
+        stdoutLock.lock()
+        defer { stdoutLock.unlock() }
+        guard !stdoutCaptureStopped else { return false }
+        let data = handle.availableData
+        guard !data.isEmpty else { return false }
+        pendingStdout.append(data)
+        guard !stdoutDrainScheduled else { return false }
+        stdoutDrainScheduled = true
+        return true
+    }
+
+    func stopAndCaptureRemainingStdout(from handle: FileHandle) {
+        stdoutLock.lock()
+        defer { stdoutLock.unlock() }
+        stdoutCaptureStopped = true
+        while true {
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            pendingStdout.append(data)
+        }
+    }
+
+    func stopCapturingStdout() {
+        stdoutLock.lock()
+        stdoutCaptureStopped = true
+        stdoutLock.unlock()
+    }
+
+    func takePendingStdout() -> Data {
+        stdoutLock.lock()
+        defer { stdoutLock.unlock() }
+        let data = pendingStdout
+        pendingStdout = Data()
+        stdoutDrainScheduled = false
+        return data
     }
 }
 
@@ -410,6 +500,12 @@ enum CodexWireRequest {
         case .askEveryTime, .allowForAttempt: "on-request"
         case .denyAll: "never"
         }
+    }
+
+    /// Codex still asks the client to resolve requests for an allowed attempt.
+    /// Reply at the protocol layer so the UI stays unblocked.
+    static func automaticApprovalDecision(for policy: ApprovalPolicy) -> String? {
+        policy == .allowForAttempt ? "acceptForSession" : nil
     }
 }
 

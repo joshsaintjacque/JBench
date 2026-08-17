@@ -40,11 +40,42 @@ import Testing
     let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
     let manifest = try decoder.decode(PortableEvidenceManifest.self, from: manifestData)
     #expect(manifest.run.rawEvidenceDirectory == "evidence")
+    #expect(manifest.run.agents.allSatisfy { $0.attempts.allSatisfy { attempt in
+        guard let rawEventFile = attempt.rawEventFile else { return true }
+        return !rawEventFile.contains("/")
+    } })
     #expect(manifest.run.directoryPath == "/tmp/example")
     #expect(manifest.verdict?.winningAgentRunID == firstRunID)
     #expect(manifest.verdict?.note == "Clearer answer")
     #expect(manifest.evidence.allSatisfy { !$0.path.hasPrefix("/") && $0.sha256.count == 64 })
     #expect(manifest.patches.count == 1)
+}
+
+@Test func exportedEvidenceReferencesResolveAfterMovingBundle() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("jbench-export-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+
+    let evidence = root.appendingPathComponent("source-evidence", isDirectory: true)
+    try fm.createDirectory(at: evidence, withIntermediateDirectories: true)
+    let config = AgentConfiguration(harness: .fake, model: "fixture")
+    let attempt = AgentAttempt(id: UUID(), agentRunID: UUID(), number: 1, state: .completed, requested: config, rawEventFile: "events.jsonl")
+    try Data(#"{"event":"done"}"#.utf8).write(to: evidence.appendingPathComponent("events.jsonl"))
+    let run = try BenchmarkRun(prompt: "portable export", directoryPath: root.path, repositoryState: .nonGit, executionMode: .readOnly, rawEvidenceDirectory: evidence.path, agents: [AgentRun(runID: UUID(), displayOrder: 0, requested: config, attempts: [attempt]), AgentRun(runID: UUID(), displayOrder: 1, requested: config)])
+
+    let bundle = try ExportService().exportEvidenceBundle(run, to: root)
+    let moved = root.appendingPathComponent("moved-bundle", isDirectory: true)
+    try fm.moveItem(at: bundle.directory, to: moved)
+    let data = try Data(contentsOf: moved.appendingPathComponent("run-manifest.json"))
+    let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+    let manifest = try decoder.decode(PortableEvidenceManifest.self, from: data)
+    let exportedAttempt = try #require(manifest.run.agents.first?.attempts.first)
+    let rawEventFile = try #require(exportedAttempt.rawEventFile)
+    let resolvedFile = moved.appendingPathComponent(manifest.run.rawEvidenceDirectory).appendingPathComponent(rawEventFile)
+
+    #expect(fm.fileExists(atPath: resolvedFile.path))
+    #expect(try Data(contentsOf: resolvedFile) == Data(#"{"event":"done"}"#.utf8))
 }
 
 @Test func rejectsEvidencePathEscape() throws {

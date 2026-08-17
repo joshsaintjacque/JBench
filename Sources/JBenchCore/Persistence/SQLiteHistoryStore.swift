@@ -87,18 +87,34 @@ public actor SQLiteHistoryStore {
     public func deletePreset(id: UUID) throws { try delete(table: "presets", id: id) }
 
     public func saveRun(_ run: BenchmarkRun) throws {
+        try saveRun(run, worktrees: [])
+    }
+
+    /// Saves a run and any worktrees created while preparing its current attempts
+    /// in one SQLite transaction.
+    public func saveRun(_ run: BenchmarkRun, worktrees: [WorktreeRecord]) throws {
+        let attemptIDs = Set(run.agents.flatMap(\.attempts).map(\.id))
+        guard worktrees.allSatisfy({ attemptIDs.contains($0.attemptID) }) else {
+            throw JBenchCoreError.storage("A worktree must belong to an attempt in the run being saved.")
+        }
+        guard Set(worktrees.map(\.id)).count == worktrees.count else {
+            throw JBenchCoreError.storage("A run cannot save the same worktree record more than once.")
+        }
         let runData = try encoder.encode(run)
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
             let statement = "INSERT INTO runs(id, title, prompt, directory_path, created_at, state, body) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, prompt=excluded.prompt, directory_path=excluded.directory_path, created_at=excluded.created_at, state=excluded.state, body=excluded.body"
             try bindAndStep(statement, values: [.text(run.id.uuidString), .text(run.title), .text(run.prompt), .text(run.directoryPath), .double(run.createdAt.timeIntervalSince1970), .text(run.state.rawValue), .blob(runData)])
-            try Self.execute(database, "DELETE FROM attempts WHERE run_id = '\(run.id.uuidString)'")
+            var currentAttemptIDs: [String] = []
             for agent in run.agents {
                 for attempt in agent.attempts {
                     let data = try encoder.encode(attempt)
-                    try bindAndStep("INSERT INTO attempts(id, run_id, agent_run_id, number, state, harness, body) VALUES(?,?,?,?,?,?,?)", values: [.text(attempt.id.uuidString), .text(run.id.uuidString), .text(agent.id.uuidString), .integer(Int64(attempt.number)), .text(attempt.state.rawValue), .text(attempt.requested.harness.rawValue), .blob(data)])
+                    currentAttemptIDs.append(attempt.id.uuidString)
+                    try bindAndStep("INSERT INTO attempts(id, run_id, agent_run_id, number, state, harness, body) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id, agent_run_id=excluded.agent_run_id, number=excluded.number, state=excluded.state, harness=excluded.harness, body=excluded.body", values: [.text(attempt.id.uuidString), .text(run.id.uuidString), .text(agent.id.uuidString), .integer(Int64(attempt.number)), .text(attempt.state.rawValue), .text(attempt.requested.harness.rawValue), .blob(data)])
                 }
             }
+            try deleteObsoleteAttempts(for: run.id, keeping: currentAttemptIDs)
+            for record in worktrees { try saveWorktreeRecord(record) }
             try Self.execute(database, "COMMIT")
         } catch {
             _ = try? Self.execute(database, "ROLLBACK")
@@ -134,6 +150,10 @@ public actor SQLiteHistoryStore {
     }
 
     public func saveWorktree(_ record: WorktreeRecord) throws {
+        try saveWorktreeRecord(record)
+    }
+
+    private func saveWorktreeRecord(_ record: WorktreeRecord) throws {
         let body = try encoder.encode(record)
         try bindAndStep("INSERT INTO worktrees(id, run_id, attempt_id, disposition, body) SELECT ?, a.run_id, ?, ?, ? FROM attempts a WHERE a.id = ? ON CONFLICT(id) DO UPDATE SET disposition=excluded.disposition, body=excluded.body", values: [.text(record.id.uuidString), .text(record.attemptID.uuidString), .text(record.disposition.rawValue), .blob(body), .text(record.attemptID.uuidString)])
     }
@@ -202,6 +222,15 @@ public actor SQLiteHistoryStore {
         }
     }
     private func delete(table: String, id: UUID) throws { try bindAndStep("DELETE FROM \(table) WHERE id = ?", values: [.text(id.uuidString)]) }
+    /// Worktree resolution uses its attempt ID after a run is saved again. Keep
+    /// those backing rows while pruning attempts no longer present in the run.
+    private func deleteObsoleteAttempts(for runID: UUID, keeping attemptIDs: [String]) throws {
+        let placeholders = Array(repeating: "?", count: attemptIDs.count).joined(separator: ", ")
+        let retainedClause = attemptIDs.isEmpty ? "" : " AND id NOT IN (\(placeholders))"
+        let statement = "DELETE FROM attempts WHERE run_id = ?\(retainedClause) AND id NOT IN (SELECT attempt_id FROM worktrees WHERE run_id = ?)"
+        let values = [.text(runID.uuidString)] + attemptIDs.map(Binding.text) + [.text(runID.uuidString)]
+        try bindAndStep(statement, values: values)
+    }
     private func queryBlobs(_ sql: String, bindings: [Binding] = []) throws -> [Data] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw Self.error(database) }

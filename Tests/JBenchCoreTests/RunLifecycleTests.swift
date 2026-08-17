@@ -29,8 +29,7 @@ struct RunLifecycleTests {
             AgentConfiguration(harness: .fake, model: "one"),
             AgentConfiguration(harness: .fake, model: "two")
         ], mode: .editable))
-        try await Task.sleep(for: .milliseconds(60))
-        let first = try #require((try await coordinator.run(id: created.id))?.agents[0].attempts.last)
+        let first = try await terminalAttempt(in: created.id, agentIndex: 0, from: coordinator)
         let retry = try await coordinator.retry(failedAttemptID: first.id)
         let snapshot = try #require(await coordinator.snapshot(for: retry.id))
         let initialSnapshot = try #require(await coordinator.snapshot(for: first.id))
@@ -47,8 +46,7 @@ struct RunLifecycleTests {
             AgentConfiguration(harness: .fake, model: "missing-sentinel"),
             AgentConfiguration(harness: .fake, model: "good-sentinel")
         ]))
-        try await Task.sleep(for: .milliseconds(60))
-        let finished = try #require(await coordinator.run(id: run.id))
+        let finished = try await terminalRun(run.id, from: coordinator)
 
         #expect(finished.agents[0].state == .failed)
         #expect(finished.agents[1].state == .completed)
@@ -111,6 +109,26 @@ struct RunLifecycleTests {
         let stopped = try #require(await coordinator.run(id: created.id))
         #expect(stopped.agents.allSatisfy { $0.state == .completed })
         #expect(await adapter.shutdowns == 2)
+    }
+
+    private func terminalAttempt(in runID: UUID, agentIndex: Int, from coordinator: RunCoordinator) async throws -> AgentAttempt {
+        for _ in 0..<200 {
+            if let attempt = try await coordinator.run(id: runID)?.agents[agentIndex].attempts.last, attempt.state.isTerminal {
+                return attempt
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw JBenchCoreError.storage("Timed out waiting for the provider-free fixture attempt to finish.")
+    }
+
+    private func terminalRun(_ id: UUID, from coordinator: RunCoordinator) async throws -> BenchmarkRun {
+        for _ in 0..<200 {
+            if let run = try await coordinator.run(id: id), run.agents.allSatisfy({ $0.state.isTerminal }) {
+                return run
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw JBenchCoreError.storage("Timed out waiting for the provider-free fixture run to finish.")
     }
 }
 

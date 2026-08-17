@@ -3,6 +3,17 @@ import Testing
 @testable import JBenchCore
 
 struct DomainModelsTests {
+    @Test func decodesAttemptsSavedBeforeActivityRetention() throws {
+        let attempt = AgentAttempt(agentRunID: UUID(), number: 1, requested: .init(harness: .fake, model: "fixture"))
+        let encoded = try JSONEncoder().encode(attempt)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "activity")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(AgentAttempt.self, from: legacy)
+        #expect(decoded.activity.isEmpty)
+    }
+
     @Test func presetRequiresTwoToSixAgents() throws {
         let configuration = AgentConfiguration(harness: .fake, model: "one")
         #expect(throws: JBenchCoreError.self) { try Preset(name: "Too few", agents: [configuration]) }

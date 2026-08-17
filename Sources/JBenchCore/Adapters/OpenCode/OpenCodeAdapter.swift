@@ -217,7 +217,8 @@ public actor OpenCodeAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
             directoryPath: request.directoryPath,
             sessionID: sessionID,
             model: request.configuration.model,
-            prompt: request.prompt
+            prompt: request.prompt,
+            reasoning: request.configuration.reasoning
         )
 
         for try await line in bytes.lines {
@@ -326,16 +327,22 @@ public actor OpenCodeAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         return (id, response.body)
     }
 
-    private static func prompt(baseURL: URL, directoryPath: String, sessionID: String, model: String, prompt: String) async throws {
+    private static func prompt(baseURL: URL, directoryPath: String, sessionID: String, model: String, prompt: String, reasoning: String?) async throws {
+        let body = promptBody(model: model, prompt: prompt, reasoning: reasoning)
+        let response = try await request(method: "POST", baseURL: baseURL, path: "/session/\(sessionID)/prompt_async", directoryPath: directoryPath, jsonBody: body)
+        guard (200..<300).contains(response.statusCode) else { throw OpenCodeAdapterError.http(statusCode: response.statusCode, body: response.body) }
+    }
+
+    static func promptBody(model: String, prompt: String, reasoning: String?) -> [String: Any] {
         let modelParts = model.split(separator: "/", maxSplits: 1).map(String.init)
         let providerID = modelParts.count == 2 ? modelParts[0] : ""
         let modelID = modelParts.count == 2 ? modelParts[1] : model
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": ["providerID": providerID, "modelID": modelID],
             "parts": [["type": "text", "text": prompt]]
         ]
-        let response = try await request(method: "POST", baseURL: baseURL, path: "/session/\(sessionID)/prompt_async", directoryPath: directoryPath, jsonBody: body)
-        guard (200..<300).contains(response.statusCode) else { throw OpenCodeAdapterError.http(statusCode: response.statusCode, body: response.body) }
+        if let reasoning { body["variant"] = reasoning }
+        return body
     }
 
     private static func abort(baseURL: URL, directoryPath: String, sessionID: String) async throws {

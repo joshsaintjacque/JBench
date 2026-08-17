@@ -51,6 +51,63 @@ struct RepositoryServiceTests {
         await #expect(throws: RepositoryServiceError.self) { try await repository.revalidateEditableRun(context) }
     }
 
+    @Test func nestedUntrackedFilesProduceRepositoryRelativeApplyablePatchPaths() async throws {
+        let fixture = try GitFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryService()
+        let context = try await repository.prepareEditableRun(directory: fixture.repository)
+        let service = try EditableWorktreeService(repository: repository, ownedRoot: fixture.root.appending(path: "owned", directoryHint: .isDirectory))
+        let record = try await service.createWorktree(for: UUID(), context: context)
+        let worktree = URL(filePath: record.ownedWorktreePath)
+        let nestedDirectory = worktree.appending(path: "nested/notes", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+        try Data("nested addition".utf8).write(to: nestedDirectory.appending(path: "new.txt"))
+
+        let changes = try await service.collectChanges(for: record.id)
+        #expect(changes.files.contains(where: { $0.status == "??" && $0.path == "nested/notes/new.txt" }))
+
+        let patch = fixture.root.appending(path: "nested.patch")
+        _ = try await service.exportPatch(for: record.id, to: patch)
+        let patchText = try String(contentsOf: patch, encoding: .utf8)
+        #expect(patchText.contains("diff --git a/nested/notes/new.txt b/nested/notes/new.txt"))
+        #expect(!patchText.contains(worktree.path))
+        try fixture.git(["apply", "--check", patch.path])
+
+        try await service.authorizeResolution(record.id, after: terminalAttempt(for: record))
+        _ = try await service.discard(record.id)
+        #expect(!FileManager.default.fileExists(atPath: worktree.path))
+    }
+
+    @Test func committedWorktreeChangesCanExportKeepAndDiscard() async throws {
+        let fixture = try GitFixture()
+        defer { fixture.remove() }
+        let repository = RepositoryService()
+        let context = try await repository.prepareEditableRun(directory: fixture.repository)
+        let service = try EditableWorktreeService(repository: repository, ownedRoot: fixture.root.appending(path: "owned", directoryHint: .isDirectory))
+
+        let keptRecord = try await service.createWorktree(for: UUID(), context: context)
+        let keptWorktree = URL(filePath: keptRecord.ownedWorktreePath)
+        try commitChange(in: keptWorktree, contents: "kept commit")
+        let changes = try await service.collectChanges(for: keptRecord.id)
+        #expect(changes.files.contains(where: { $0.status == "M " && $0.path == "file.txt" }))
+        #expect(String(decoding: changes.patch, as: UTF8.self).contains("kept commit"))
+        let patch = fixture.root.appending(path: "committed.patch")
+        _ = try await service.exportPatch(for: keptRecord.id, to: patch)
+        try fixture.git(["apply", "--check", patch.path])
+        try await service.authorizeResolution(keptRecord.id, after: terminalAttempt(for: keptRecord))
+        let keptDestination = fixture.root.appending(path: "kept-committed-worktree", directoryHint: .isDirectory)
+        #expect(try await service.keep(keptRecord.id, at: keptDestination).disposition == .transferred)
+        #expect(FileManager.default.fileExists(atPath: keptDestination.path))
+        #expect(!FileManager.default.fileExists(atPath: keptWorktree.path))
+
+        let discardedRecord = try await service.createWorktree(for: UUID(), context: context)
+        let discardedWorktree = URL(filePath: discardedRecord.ownedWorktreePath)
+        try commitChange(in: discardedWorktree, contents: "discarded commit")
+        try await service.authorizeResolution(discardedRecord.id, after: terminalAttempt(for: discardedRecord))
+        #expect(try await service.discard(discardedRecord.id).disposition == .discarded)
+        #expect(!FileManager.default.fileExists(atPath: discardedWorktree.path))
+    }
+
     @Test func sentinelReportsAddedRemovedAndModifiedFiles() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -148,6 +205,12 @@ private func terminalAttempt(for record: WorktreeRecord) -> AgentAttempt {
     attempt.state = .completed
     attempt.endedAt = .now
     return attempt
+}
+
+private func commitChange(in worktree: URL, contents: String) throws {
+    try Data(contents.utf8).write(to: worktree.appending(path: "file.txt"))
+    _ = try SystemCommand.run(executable: URL(filePath: "/usr/bin/git"), arguments: ["-C", worktree.path, "add", "file.txt"])
+    _ = try SystemCommand.run(executable: URL(filePath: "/usr/bin/git"), arguments: ["-C", worktree.path, "commit", "-m", "worktree change"])
 }
 
 private final class TemporaryDirectory: @unchecked Sendable {

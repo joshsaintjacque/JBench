@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import Observation
 import UserNotifications
@@ -9,7 +10,9 @@ import JBenchCore
 /// only through the explicit provider-free demo action.
 @Observable @MainActor
 final class JBenchAppStore: JBenchRunService {
-    var section: AppSection = .newRun
+    var section: AppSection = .newRun {
+        didSet { resetVerdictSelectionForCurrentTarget() }
+    }
     var prompt = ""
     var runTitle = ""
     var directory: String
@@ -31,7 +34,9 @@ final class JBenchAppStore: JBenchRunService {
     var winningLaneID: UUID?
     var reviewNote = ""
     var history: [HistoryPresentation] = []
-    var selectedHistoryID: UUID?
+    var selectedHistoryID: UUID? {
+        didSet { resetVerdictSelectionForCurrentTarget() }
+    }
     var presets: [Preset] = []
     var timeoutMinutes = 30 { didSet { updateTimeouts() } }
     var usesNoTimeout = false { didSet { updateTimeouts() } }
@@ -75,10 +80,17 @@ final class JBenchAppStore: JBenchRunService {
     private var worktreeRecords: [UUID: WorktreeRecord] = [:]
     private var worktreeDiffs: [UUID: String] = [:]
     private var attemptIDsByLane: [UUID: UUID] = [:]
+    private var pendingApprovalsByAttemptID: [UUID: ApprovalRequest] = [:]
     private var verdicts: [UUID: Verdict] = [:]
     private var pendingExportRunID: UUID?
     private var pendingExportDestination: URL?
     private var pendingExportIsBundle = false
+    private let configurationPolicy = RunConfigurationPolicy()
+
+    private struct EvidenceBundlePatchSources {
+        var urls: [URL]
+        var generatedTemporaryURLs: [URL]
+    }
 
     init(automaticallyRunsDemo: Bool = true) {
         directory = FileManager.default.currentDirectoryPath
@@ -122,13 +134,13 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     var canRun: Bool {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              (2...6).contains(configurations.count),
-              !isBackgroundRunActive else { return false }
-        if isDemoMode { return configurations.allSatisfy { $0.harness == .fake } }
-        return configurations.allSatisfy { configuration in
-            configuration.harness != .fake && catalog(for: configuration.harness).contains { $0.nativeModelID == configuration.model }
-        }
+        configurationPolicy.canRun(
+            prompt: prompt,
+            configurations: configurations,
+            isDemoMode: isDemoMode,
+            isBackgroundRunActive: isBackgroundRunActive,
+            settings: discoverySettings
+        )
     }
 
     var selectedHistory: HistoryPresentation? { history.first(where: { $0.id == selectedHistoryID }) }
@@ -154,27 +166,22 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func catalog(for harness: HarnessKind) -> [ModelCatalogEntry] {
-        if harness == .fake { return [] }
-        // Reading this cached settings value does not trigger discovery or a harness process.
-        return discoverySettings.cachedCatalog.filter { $0.harness == harness && $0.availability == .available }
-            + discoverySettings.customModels.filter { $0.harness == harness }
+        configurationPolicy.catalog(for: harness, settings: discoverySettings)
     }
 
     func models(for harness: HarnessKind) -> [String] {
-        let values = catalog(for: harness).map(\.nativeModelID)
-        return values.isEmpty ? ["Not selected"] : values
+        configurationPolicy.models(for: harness, settings: discoverySettings)
     }
 
     func reasoningValues(for configuration: AgentConfiguration) -> [String] {
-        guard let model = catalog(for: configuration.harness).first(where: { $0.nativeModelID == configuration.model }) else { return ["Default"] }
-        return ["Default"] + model.nativeReasoningValues
+        configurationPolicy.reasoningValues(for: configuration, settings: discoverySettings)
     }
 
     func addConfiguration() {
         guard configurations.count < 6 else { return }
         let harness: HarnessKind = isDemoMode ? .fake : .codex
         let model = isDemoMode ? "Provider-free sample" : models(for: harness).first ?? "Not selected"
-        configurations.append(.init(harness: harness, model: model, timeoutSeconds: usesNoTimeout ? nil : TimeInterval(timeoutMinutes * 60)))
+        configurations.append(.init(harness: harness, model: model, timeoutSeconds: configurationPolicy.timeoutSeconds(timeoutMinutes: timeoutMinutes, usesNoTimeout: usesNoTimeout)))
         statusMessage = "Added lane \(configurations.count)"
     }
 
@@ -199,11 +206,7 @@ final class JBenchAppStore: JBenchRunService {
 
     func normalizeConfiguration(_ id: UUID) {
         guard let index = configurations.firstIndex(where: { $0.id == id }) else { return }
-        let harness = configurations[index].harness
-        let options = models(for: harness)
-        if !options.contains(configurations[index].model) { configurations[index].model = options.first ?? "Not selected" }
-        let reasoning = reasoningValues(for: configurations[index])
-        if let current = configurations[index].reasoning, !reasoning.contains(current) { configurations[index].reasoning = nil }
+        configurations[index] = configurationPolicy.normalized(configurations[index], settings: discoverySettings)
     }
 
     func start(prompt: String, directory: String, mode: ExecutionMode, configurations: [AgentConfiguration]) {
@@ -247,23 +250,58 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func cancel(laneID: UUID) {
-        guard let run = activeRun ?? historyRun(id: activeRunID),
+        guard let run = runContainingLane(laneID),
               let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
         Task { await coordinator?.cancel(attemptID: attempt.id) }
     }
 
     func retry(laneID: UUID) {
-        guard let run = activeRun ?? historyRun(id: activeRunID), let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
+        guard !isBackgroundRunActive else {
+            statusMessage = "Wait for the active lanes to finish before retrying another lane."
+            return
+        }
+        guard let run = runContainingLane(laneID), let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
+        guard let coordinator else {
+            statusMessage = "JBench could not open its local database."
+            return
+        }
+        let previousRun = activeRun
+        let previousRunID = activeRunID
+        let previousLanes = lanes
+        let wasBackgroundRunActive = isBackgroundRunActive
+        isBackgroundRunActive = true
         Task {
-            do { _ = try await coordinator?.retry(failedAttemptID: attempt.id) }
-            catch { statusMessage = actionable(error) }
+            do {
+                guard let refreshed = try await coordinator.run(id: run.id) else {
+                    activeRun = previousRun
+                    activeRunID = previousRunID
+                    lanes = previousLanes
+                    isBackgroundRunActive = wasBackgroundRunActive
+                    statusMessage = "Could not load this run for retry."
+                    return
+                }
+                activeRunID = refreshed.id
+                activeRun = refreshed
+                lanes = presentation(for: refreshed)
+                _ = try await coordinator.retry(failedAttemptID: attempt.id)
+            }
+            catch {
+                activeRun = previousRun
+                activeRunID = previousRunID
+                lanes = previousLanes
+                isBackgroundRunActive = wasBackgroundRunActive
+                statusMessage = actionable(error)
+            }
         }
     }
 
     func reply(_ reply: ApprovalReply, laneID: UUID) {
-        guard let run = activeRun, let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
+        guard let run = runContainingLane(laneID), let agent = run.agents.first(where: { $0.id == laneID }), let attempt = agent.attempts.last else { return }
         Task {
-            do { try await coordinator?.reply(reply, attemptID: attempt.id) }
+            do {
+                try await coordinator?.reply(reply, attemptID: attempt.id)
+                pendingApprovalsByAttemptID[attempt.id] = nil
+            }
             catch { statusMessage = actionable(error) }
         }
     }
@@ -365,18 +403,25 @@ final class JBenchAppStore: JBenchRunService {
 
     func leaveDemoMode() {
         isDemoMode = false
-        configurations = (0..<2).map { _ in .init(harness: .codex, model: models(for: .codex).first ?? "Not selected", timeoutSeconds: usesNoTimeout ? nil : TimeInterval(timeoutMinutes * 60)) }
+        configurations = (0..<2).map { _ in .init(harness: .codex, model: models(for: .codex).first ?? "Not selected", timeoutSeconds: configurationPolicy.timeoutSeconds(timeoutMinutes: timeoutMinutes, usesNoTimeout: usesNoTimeout)) }
         statusMessage = "Normal mode uses discovered local harnesses."
     }
 
     func saveManualVerdict() {
         guard let winningLaneID else { statusMessage = "Select a winner first"; return }
-        let targetID = section == .history ? selectedHistoryID : activeRun?.id
+        let targetID = verdictTargetID
+        let selectedWinnerID = winningLaneID
         guard let targetID else { statusMessage = "No run is selected for this verdict."; return }
         Task {
             do {
                 guard let run = try await coordinator?.run(id: targetID) else { statusMessage = "Could not load the selected run."; return }
-                let verdict = Verdict(runID: run.id, winningAgentRunID: winningLaneID, note: reviewNote.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
+                guard verdictTargetID == targetID else { return }
+                guard run.agents.contains(where: { $0.id == selectedWinnerID }) else {
+                    self.winningLaneID = nil
+                    statusMessage = "Select a winner from the run you are reviewing."
+                    return
+                }
+                let verdict = Verdict(runID: run.id, winningAgentRunID: selectedWinnerID, note: reviewNote.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
                 try await historyStore?.saveVerdict(verdict)
                 verdicts[run.id] = verdict
                 isRevealOn = true
@@ -386,13 +431,13 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     var canRevealIdentities: Bool {
-        let targetID = section == .history ? selectedHistoryID : activeRun?.id
+        let targetID = verdictTargetID
         guard let targetID else { return false }
         return verdicts[targetID] != nil
     }
 
     func skipManualVerdict() {
-        let targetID = section == .history ? selectedHistoryID : activeRun?.id
+        let targetID = verdictTargetID
         guard let targetID else { statusMessage = "No run is selected."; return }
         Task {
             do {
@@ -410,7 +455,9 @@ final class JBenchAppStore: JBenchRunService {
     func loadVerdictForSelectedHistory() {
         guard let id = selectedHistoryID else { return }
         let verdict = verdicts[id]
-        winningLaneID = verdict?.winningAgentRunID
+        winningLaneID = verdict?.winningAgentRunID.flatMap { laneID in
+            historyRuns[id]?.agents.contains(where: { $0.id == laneID }) == true ? laneID : nil
+        }
         reviewNote = verdict?.note ?? ""
     }
 
@@ -573,9 +620,9 @@ final class JBenchAppStore: JBenchRunService {
                 guard let run = try await coordinator?.run(id: targetID) else { statusMessage = "No run is available to export."; return }
                 let verdict = try await historyStore?.verdict(for: run.id)
                 if bundle {
-                    let attemptIDs = Set(run.agents.flatMap(\.attempts).map(\.id))
-                    let patches = worktreeRecords.values.filter { attemptIDs.contains($0.attemptID) }.compactMap { $0.patchReference.map(URL.init(fileURLWithPath:)) }
-                    let result = try exportService.exportEvidenceBundle(run, verdict: verdict, patches: patches, to: destination)
+                    let patchSources = try await evidenceBundlePatchSources(for: run)
+                    defer { patchSources.generatedTemporaryURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
+                    let result = try exportService.exportEvidenceBundle(run, verdict: verdict, patches: patchSources.urls, to: destination)
                     statusMessage = "Evidence bundle saved to \(result.directory.lastPathComponent)"
                 } else {
                     let result = try exportService.exportMarkdownReport(run, verdict: verdict, to: destination)
@@ -614,13 +661,13 @@ final class JBenchAppStore: JBenchRunService {
             worktreeMessage = "No JBench-owned worktree is recorded for this lane."
             return
         }
-        if action == "Keep" || action == "Discard" {
+        if action == "Keep" || action == "Discard" || action == "Export patch" {
             guard let attempt = attempt(for: lane.id), attempt.state.isTerminal else {
-                worktreeMessage = "Keep and Discard are blocked until this lane is terminal and its owned process has exited."
+                worktreeMessage = "Patch export, Keep, and Discard are blocked until this lane is terminal and its owned process has exited."
                 return
             }
             if ownedProcessIsStillRunning(attempt) {
-                worktreeMessage = "Keep and Discard are blocked while JBench still owns a running harness process."
+                worktreeMessage = "Patch export, Keep, and Discard are blocked while JBench still owns a running harness process."
                 return
             }
         }
@@ -642,10 +689,18 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     private func exportPatch(_ record: WorktreeRecord) {
+        guard let attempt = attemptByID(record.attemptID), attempt.state.isTerminal, !ownedProcessIsStillRunning(attempt) else {
+            worktreeMessage = "Patch export is blocked until this lane is terminal and its owned process has exited."
+            return
+        }
         let panel = NSSavePanel(); panel.nameFieldStringValue = "JBench-\(record.attemptID.uuidString.prefix(8)).patch"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         Task {
             do {
+                guard let current = attemptByID(record.attemptID), current.state.isTerminal, !ownedProcessIsStillRunning(current) else {
+                    worktreeMessage = "Patch export is blocked until this lane is terminal and its owned process has exited."
+                    return
+                }
                 let result = try await worktrees?.exportPatch(for: record.id, to: destination)
                 if var updated = worktreeRecords[record.id] { updated.patchReference = result?.path; worktreeRecords[record.id] = updated; try await historyStore?.saveWorktree(updated); refreshActiveLanes() }
                 worktreeMessage = "Patch exported to \(destination.lastPathComponent)"
@@ -771,19 +826,23 @@ final class JBenchAppStore: JBenchRunService {
             activeRunID = run.id; activeRun = run; lanes = presentation(for: run)
         case .attemptChanged(let id, _, _):
             if let refreshed = try? await coordinator.run(id: id) {
-                activeRun = refreshed
+                reconcilePendingApprovals(for: refreshed)
                 await collectTerminalWorktreeChanges(for: refreshed)
-                if activeRunID == id { lanes = presentation(for: refreshed) }
+                guard activeRunID == id else { return }
+                activeRun = refreshed
+                lanes = presentation(for: refreshed)
                 if refreshed.endedAt != nil { await finish(run: refreshed) }
             }
         case .runFinished(let run):
+            guard activeRunID == run.id else { return }
             activeRun = run
-            if activeRunID == run.id { lanes = presentation(for: run) }
+            lanes = presentation(for: run)
             await finish(run: run)
         case .lifecycleChanged(let snapshot):
             if let record = snapshot.metadata.worktree { worktreeRecords[record.id] = record; refreshActiveLanes() }
-        case .approvalNeeded(let runID, let agentRunID, _, let approval):
+        case .approvalNeeded(let runID, let agentRunID, let attemptID, let approval):
             guard runID == activeRunID, let index = lanes.firstIndex(where: { $0.id == agentRunID }) else { return }
+            pendingApprovalsByAttemptID[attemptID] = approval
             lanes[index].approval = approval
             statusMessage = "Approval needed for lane \((lanes.firstIndex(where: { $0.id == agentRunID }) ?? 0) + 1)"
             if notifyOnCompletion { notifyApproval(approval, lane: index + 1) }
@@ -792,6 +851,7 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     private func finish(run: BenchmarkRun) async {
+        guard activeRunID == run.id else { return }
         await collectTerminalWorktreeChanges(for: run)
         isBackgroundRunActive = false
         statusMessage = "\(run.agents.count) lanes \(run.state == .completed ? "completed" : "finished with \(run.state.rawValue)")"
@@ -805,7 +865,8 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     private func loadHistory() async {
-        guard let runs = try? await historyStore?.search() else { return }
+        guard let persistedRuns = try? await historyStore?.search() else { return }
+        let runs = await reconcilePersistedNonterminalAttempts(in: persistedRuns)
         historyRuns = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, $0) })
         for run in runs {
             if let verdict = try? await historyStore?.verdict(for: run.id) { verdicts[run.id] = verdict }
@@ -834,6 +895,22 @@ final class JBenchAppStore: JBenchRunService {
         return activeRun?.id == item.id ? activeRun : nil
     }
 
+    private var verdictTargetID: UUID? {
+        section == .history ? selectedHistoryID : activeRun?.id
+    }
+
+    private func resetVerdictSelectionForCurrentTarget() {
+        winningLaneID = nil
+        reviewNote = ""
+        isRevealOn = false
+        if section == .history, selectedHistoryID != nil { loadVerdictForSelectedHistory() }
+    }
+
+    private func runContainingLane(_ laneID: UUID) -> BenchmarkRun? {
+        if let activeRun, activeRun.agents.contains(where: { $0.id == laneID }) { return activeRun }
+        return historyRuns.values.first(where: { $0.agents.contains(where: { $0.id == laneID }) })
+    }
+
     private func refreshActiveLanes() {
         if let activeRun { lanes = presentation(for: activeRun) }
     }
@@ -854,6 +931,7 @@ final class JBenchAppStore: JBenchRunService {
                 elapsed: measured(attempt?.metrics.elapsedSeconds, provenance: attempt?.metrics.elapsedProvenance),
                 tokens: tokenText(attempt?.metrics),
                 cost: costText(attempt?.metrics),
+                approval: attempt.flatMap { pendingApprovalsByAttemptID[$0.id] },
                 worktree: worktree.map { WorktreePresentation(path: $0.transferredPath ?? $0.ownedWorktreePath, changedFiles: $0.changedFileCount ?? 0, status: $0.disposition.rawValue, diff: worktreeDiffs[$0.id] ?? "") },
                 blindReviewOrder: agent.blindReviewOrder ?? agent.displayOrder
             )
@@ -881,10 +959,146 @@ final class JBenchAppStore: JBenchRunService {
         }
     }
 
+    private func reconcilePendingApprovals(for run: BenchmarkRun) {
+        let waitingAttemptIDs = Set(run.agents.compactMap { agent -> UUID? in
+            guard let attempt = agent.attempts.last, attempt.state == .waitingForApproval else { return nil }
+            return attempt.id
+        })
+        pendingApprovalsByAttemptID = pendingApprovalsByAttemptID.filter { waitingAttemptIDs.contains($0.key) }
+    }
+
+    private func reconcilePersistedNonterminalAttempts(in persistedRuns: [BenchmarkRun]) async -> [BenchmarkRun] {
+        var reconciledRuns: [BenchmarkRun] = []
+        for var run in persistedRuns {
+            var changed = false
+            let now = Date.now
+            for agentIndex in run.agents.indices {
+                for attemptIndex in run.agents[agentIndex].attempts.indices {
+                    var attempt = run.agents[agentIndex].attempts[attemptIndex]
+                    guard !attempt.state.isTerminal else { continue }
+                    let cleanupDiagnostic = await terminateVerifiedPersistedProcesses(for: attempt)
+                    attempt.state = .interrupted
+                    attempt.endedAt = now
+                    attempt.cancellationDetail = "Interrupted after JBench relaunched; this coordinator cannot resume persisted harness processes. \(cleanupDiagnostic)"
+                    attempt.appendActivity("Relaunch cleanup: \(cleanupDiagnostic)", timestamp: now)
+                    if let started = attempt.startedAt {
+                        attempt.metrics.elapsedSeconds = now.timeIntervalSince(started)
+                        attempt.metrics.elapsedProvenance = .locallyMeasured
+                    }
+                    run.agents[agentIndex].attempts[attemptIndex] = attempt
+                    changed = true
+                }
+            }
+            if changed {
+                if run.agents.allSatisfy({ $0.state.isTerminal }) { run.endedAt = now }
+                do { try await historyStore?.saveRun(run) }
+                catch { statusMessage = "Could not mark interrupted lanes after relaunch: \(actionable(error))" }
+            }
+            reconciledRuns.append(run)
+        }
+        return reconciledRuns
+    }
+
+    private func evidenceBundlePatchSources(for run: BenchmarkRun) async throws -> EvidenceBundlePatchSources {
+        let attempts = Dictionary(uniqueKeysWithValues: run.agents.flatMap(\.attempts).map { ($0.id, $0) })
+        let terminalRecords = worktreeRecords.values
+            .filter { attempts[$0.attemptID]?.state.isTerminal == true }
+            .sorted { $0.attemptID.uuidString < $1.attemptID.uuidString }
+        var urls = terminalRecords.compactMap { validPatchReferenceURL(for: $0) }
+        var generatedTemporaryURLs: [URL] = []
+        let pendingRecords = terminalRecords.filter { $0.disposition == .pending }
+        do {
+            guard pendingRecords.isEmpty || worktrees != nil else {
+                throw JBenchCoreError.storage("JBench could not access its owned worktrees.")
+            }
+            for record in pendingRecords {
+                guard let attempt = attempts[record.attemptID], !ownedProcessIsStillRunning(attempt) else {
+                    throw JBenchCoreError.storage("Patch export is blocked until this lane's owned process has exited.")
+                }
+                let patch = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("JBench-\(record.attemptID.uuidString)-\(UUID().uuidString).patch")
+                let generated = try await worktrees!.exportPatch(for: record.id, to: patch)
+                urls.append(generated)
+                generatedTemporaryURLs.append(generated)
+            }
+            return .init(urls: urls, generatedTemporaryURLs: generatedTemporaryURLs)
+        } catch {
+            generatedTemporaryURLs.forEach { try? FileManager.default.removeItem(at: $0) }
+            throw error
+        }
+    }
+
+    private func validPatchReferenceURL(for record: WorktreeRecord) -> URL? {
+        guard let reference = record.patchReference, !reference.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: reference).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
+        return url
+    }
+
+    private func terminateVerifiedPersistedProcesses(for attempt: AgentAttempt) async -> String {
+        let owned = attempt.ownership
+        var diagnostics: [String] = []
+        var processedPIDs = Set<Int32>()
+        for (label, pid, serialized) in [("harness", owned.processID, owned.processIdentity), ("server", owned.serverProcessID, owned.serverIdentity)] {
+            guard let pid, pid > 0, processedPIDs.insert(pid).inserted else { continue }
+            diagnostics.append(await terminateVerifiedPersistedProcess(label: label, pid: pid, serialized: serialized))
+        }
+        return diagnostics.isEmpty ? "No owned process was recorded." : diagnostics.joined(separator: " ")
+    }
+
+    private func terminateVerifiedPersistedProcess(label: String, pid: Int32, serialized: String) async -> String {
+        guard !serialized.isEmpty else { return "\(label) process \(pid) was not signaled because its stored identity is unavailable." }
+        guard let initial = OwnedProcessService.identity(for: pid) else { return "\(label) process \(pid) has no current identity; no signal was sent." }
+        guard initial.serialized == serialized else { return "\(label) process \(pid) identity no longer matches; no signal was sent." }
+
+        let ownsGroup = OwnedProcessLauncher.ownsProcessGroup(pid)
+        guard OwnedProcessService.identity(for: pid)?.serialized == serialized else {
+            return "\(label) process \(pid) identity became unavailable before cleanup; no signal was sent."
+        }
+        let sentTermination = ownsGroup
+            ? OwnedProcessLauncher.signalGroup(pid, SIGTERM)
+            : Darwin.kill(pid, SIGTERM) == 0
+        guard sentTermination else { return "\(label) process \(pid) could not be sent SIGTERM after verification." }
+        if await verifiedProcessExit(pid: pid, serialized: serialized, ownsGroup: ownsGroup, timeout: .seconds(5)) {
+            return "\(label) process \(pid) exited during relaunch cleanup."
+        }
+
+        guard OwnedProcessService.identity(for: pid)?.serialized == serialized else {
+            return "\(label) process \(pid) did not exit, but its identity could not be reverified; no SIGKILL was sent."
+        }
+        let sentKill = ownsGroup
+            ? OwnedProcessLauncher.signalGroup(pid, SIGKILL)
+            : Darwin.kill(pid, SIGKILL) == 0
+        guard sentKill else { return "\(label) process \(pid) did not exit and could not be sent SIGKILL after verification." }
+        return await verifiedProcessExit(pid: pid, serialized: serialized, ownsGroup: ownsGroup, timeout: .seconds(1))
+            ? "\(label) process \(pid) exited after relaunch cleanup fallback."
+            : "\(label) process \(pid) cleanup is incomplete after verified SIGKILL."
+    }
+
+    private func verifiedProcessExit(pid: Int32, serialized: String, ownsGroup: Bool, timeout: Duration) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while clock.now < deadline {
+            let leaderMatches = OwnedProcessService.identity(for: pid)?.serialized == serialized
+            let groupRuns = ownsGroup && OwnedProcessLauncher.groupIsRunning(pid)
+            if !leaderMatches && !groupRuns { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return OwnedProcessService.identity(for: pid)?.serialized != serialized
+            && (!ownsGroup || !OwnedProcessLauncher.groupIsRunning(pid))
+    }
+
     private func activity(for attempt: AgentAttempt?) -> String {
         guard let attempt else { return "Queued" }
         if let error = attempt.errorMessage { return error }
         if let cancellation = attempt.cancellationDetail { return cancellation }
+        if attempt.state == .starting || attempt.state == .running,
+           let latestActivity = attempt.activity.last(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            return latestActivity.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         switch attempt.state {
         case .queued: return "Queued"
         case .starting: return "Starting local harness…"
@@ -932,7 +1146,7 @@ final class JBenchAppStore: JBenchRunService {
         guard let cost = metrics?.cost, metrics?.costProvenance != .unavailable else { return "Unavailable" }
         return "\(cost)"
     }
-    private func updateTimeouts() { for index in configurations.indices { configurations[index].timeoutSeconds = usesNoTimeout ? nil : TimeInterval(timeoutMinutes * 60) } }
+    private func updateTimeouts() { configurations = configurationPolicy.applyingTimeout(to: configurations, timeoutMinutes: timeoutMinutes, usesNoTimeout: usesNoTimeout) }
     private func normalizeAllConfigurations() { for configuration in configurations { normalizeConfiguration(configuration.id) } }
     private func actionable(_ error: Error) -> String { error.localizedDescription.isEmpty ? "The local operation failed. Check Settings for the harness path and diagnostics." : error.localizedDescription }
 

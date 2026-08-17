@@ -94,6 +94,21 @@ struct OpenCodeAdapterTests {
         #expect(entries.first?.discoverySource == "fixture")
     }
 
+    @Test func promptRequestUsesNativeVariantForSelectedReasoning() throws {
+        let body = OpenCodeAdapter.promptBody(model: "deepseek/v4", prompt: "Answer briefly.", reasoning: "whatever-highest")
+        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let model = try #require(json["model"] as? [String: String])
+        let parts = try #require(json["parts"] as? [[String: String]])
+
+        #expect(model == ["providerID": "deepseek", "modelID": "v4"])
+        #expect(parts == [["type": "text", "text": "Answer briefly."]])
+        #expect(json["variant"] as? String == "whatever-highest")
+
+        let defaultBody = OpenCodeAdapter.promptBody(model: "deepseek/v4", prompt: "Answer briefly.", reasoning: nil)
+        #expect(defaultBody["variant"] == nil)
+    }
+
     @Test func authStateOnlyClaimsWhatTheServerReports() {
         #expect(OpenCodeWireParser.authenticationStatus(from: "{\"status\":\"connected\"}", statusCode: 200) == .ready)
         #expect(OpenCodeWireParser.authenticationStatus(from: "{\"status\":\"disconnected\"}", statusCode: 200) == .missing)

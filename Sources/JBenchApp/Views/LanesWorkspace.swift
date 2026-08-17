@@ -186,7 +186,7 @@ private struct LaneCard: View {
     @ViewBuilder private var laneMenu: some View {
         Menu {
             if !lane.state.isTerminal { Button("Cancel Lane", role: .destructive) { store.cancel(laneID: lane.id) } }
-            if lane.state == .failed || lane.state == .timedOut || lane.state == .cancelled { Button("Retry") { store.retry(laneID: lane.id) } }
+            if lane.state == .failed || lane.state == .timedOut { Button("Retry") { store.retry(laneID: lane.id) } }
             Button("Copy Response") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(lane.output, forType: .string) }
         } label: {
             Image(systemName: "ellipsis.circle")
@@ -277,6 +277,8 @@ private struct WorktreeControls: View {
 private struct BlindReviewView: View {
     @Bindable var store: JBenchAppStore
     let lanes: [LanePresentation]
+    @State private var expandedResponses: Set<UUID> = []
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -304,7 +306,23 @@ private struct BlindReviewView: View {
                                 .buttonStyle(.bordered)
                         }
                     }
-                    Text(lane.output).lineLimit(4).textSelection(.enabled)
+                    Text(lane.output)
+                        .lineLimit(expandedResponses.contains(lane.id) ? nil : 4)
+                        .textSelection(.enabled)
+                    Button {
+                        if expandedResponses.contains(lane.id) {
+                            expandedResponses.remove(lane.id)
+                        } else {
+                            expandedResponses.insert(lane.id)
+                        }
+                    } label: {
+                        Label(
+                            expandedResponses.contains(lane.id) ? "Show less" : "Show full response",
+                            systemImage: expandedResponses.contains(lane.id) ? "chevron.up" : "chevron.down"
+                        )
+                    }
+                    .buttonStyle(.link)
+                    .controlSize(.small)
                 }
                 .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 10)).overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary) }
             }
@@ -323,7 +341,12 @@ private struct BlindReviewView: View {
 
     private func candidateTitle(for lane: LanePresentation) -> String {
         if store.isRevealOn {
-            let harness = lane.configuration.harness == .codex ? "Codex" : "OpenCode"
+            let harness: String
+            switch lane.configuration.harness {
+            case .codex: harness = "Codex"
+            case .openCode: harness = "OpenCode"
+            case .fake: harness = "Demo"
+            }
             return "\(harness) · \(lane.configuration.model)"
         }
         let ordered = lanes.sorted { $0.blindReviewOrder < $1.blindReviewOrder }

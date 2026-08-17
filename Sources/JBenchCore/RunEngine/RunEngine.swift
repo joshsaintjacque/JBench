@@ -213,6 +213,12 @@ public enum RunUpdate: Sendable, Hashable {
 }
 
 public actor RunCoordinator {
+    private struct PreparedAttemptRegistration {
+        let preparation: AttemptPreparation
+        let attempt: AgentAttempt
+        let snapshot: AttemptLifecycleSnapshot
+    }
+
     private let adapters: [HarnessKind: any HarnessAdapter]
     private let history: SQLiteHistoryStore
     private let evidence: EvidenceStore
@@ -278,12 +284,10 @@ public actor RunCoordinator {
                 let agent = run.agents[agentIndex]
                 let attempt = agent.attempts[0]
                 let result = try await preparation.prepare(.init(runID: runID, attemptID: attempt.id, attemptNumber: attempt.number, originalDirectoryPath: draft.directoryPath, sourceCommit: draft.sourceCommit, executionMode: draft.executionMode, configuration: attempt.requested, isRetry: false))
-                createdPreparations.append(result)
-                preparations[attempt.id] = result
-                applyLifecycle(result.lifecycle, to: &run.agents[agentIndex].attempts[0])
-                let capability = capabilities[attempt.requested.id]
-                let snapshot = AttemptLifecycleSnapshot(attemptID: attempt.id, readOnlyCapability: capability, metadata: result.lifecycle)
-                lifecycles[attempt.id] = snapshot
+                let registration = preparedAttempt(attempt, capability: capabilities[attempt.requested.id], result: result)
+                createdPreparations.append(registration.preparation)
+                run.agents[agentIndex].attempts[0] = registration.attempt
+                register(registration)
             }
         } catch {
             for result in createdPreparations { if let note = await preparation.abandon(result) { emit(.diagnostic(note)) } }
@@ -291,19 +295,16 @@ public actor RunCoordinator {
             throw error
         }
 
-        runs[run.id] = run
-        try await persist(run)
         do {
-            for agent in run.agents {
-                if let record = lifecycles[agent.attempts[0].id]?.metadata.worktree { try await history.saveWorktree(record) }
-            }
+            let worktrees = run.agents.compactMap { lifecycles[$0.attempts[0].id]?.metadata.worktree }
+            try await history.saveRun(run, worktrees: worktrees)
         } catch {
             for result in createdPreparations { if let note = await preparation.abandon(result) { emit(.diagnostic(note)) } }
             runs[run.id] = nil
             for agent in run.agents { preparations[agent.attempts[0].id] = nil; lifecycles[agent.attempts[0].id] = nil }
-            try? await history.deleteRun(id: run.id)
             throw error
         }
+        runs[run.id] = run
         emit(.runCreated(run))
         for agent in run.agents {
             let attemptID = agent.attempts[0].id
@@ -363,29 +364,21 @@ public actor RunCoordinator {
         // `prepare` is also the required retry revalidation point. It must use the recorded
         // run commit, not current HEAD, and returns a unique worktree for editable attempts.
         let result = try await preparation.prepare(.init(runID: run.id, attemptID: attempt.id, attemptNumber: attempt.number, originalDirectoryPath: run.directoryPath, sourceCommit: run.sourceCommit, executionMode: run.executionMode, configuration: attempt.requested, isRetry: true))
-        var preparedAttempt = attempt
-        applyLifecycle(result.lifecycle, to: &preparedAttempt)
-        preparations[preparedAttempt.id] = result
-        let snapshot = AttemptLifecycleSnapshot(attemptID: preparedAttempt.id, readOnlyCapability: capability, metadata: result.lifecycle)
-        lifecycles[preparedAttempt.id] = snapshot
-        run.agents[location.agentIndex].attempts.append(preparedAttempt)
+        let registration = preparedAttempt(attempt, capability: capability, result: result)
+        run.agents[location.agentIndex].attempts.append(registration.attempt)
         run.endedAt = nil
-        finishedRuns.remove(run.id)
-        runs[run.id] = run
-        try await persist(run)
         do {
-            if let record = snapshot.metadata.worktree { try await history.saveWorktree(record) }
+            try await history.saveRun(run, worktrees: registration.snapshot.metadata.worktree.map { [$0] } ?? [])
         } catch {
-            preparations[preparedAttempt.id] = nil; lifecycles[preparedAttempt.id] = nil
             _ = await preparation.abandon(result)
-            run.agents[location.agentIndex].attempts.removeLast()
-            runs[run.id] = run
-            try? await persist(run)
             throw error
         }
-        emit(.lifecycleChanged(snapshot))
-        await begin(runID: run.id, agentRunID: agent.id, attemptID: preparedAttempt.id)
-        return preparedAttempt
+        register(registration)
+        finishedRuns.remove(run.id)
+        runs[run.id] = run
+        emit(.lifecycleChanged(registration.snapshot))
+        await begin(runID: run.id, agentRunID: agent.id, attemptID: registration.attempt.id)
+        return registration.attempt
     }
 
     public func reply(_ reply: ApprovalReply, attemptID: UUID) async throws {
@@ -474,7 +467,9 @@ public actor RunCoordinator {
         case .outputDelta:
             current.finalResponse += event.text ?? ""
             try? await replace(current, runID: runID, agentRunID: agentRunID)
-        case .activity: break
+        case .activity:
+            current.appendActivity(event.text ?? "")
+            try? await replace(current, runID: runID, agentRunID: agentRunID)
         case .observedSettings:
             current.observed = event.observed ?? current.observed
             try? await replace(current, runID: runID, agentRunID: agentRunID)
@@ -558,6 +553,18 @@ public actor RunCoordinator {
         if let ownership = metadata.ownership { attempt.ownership = ownership }
         if let session = metadata.protocolSessionID { attempt.protocolSessionID = session }
     }
+
+    private func preparedAttempt(_ attempt: AgentAttempt, capability: ReadOnlyCapability?, result: AttemptPreparation) -> PreparedAttemptRegistration {
+        var prepared = attempt
+        applyLifecycle(result.lifecycle, to: &prepared)
+        return PreparedAttemptRegistration(preparation: result, attempt: prepared, snapshot: .init(attemptID: prepared.id, readOnlyCapability: capability, metadata: result.lifecycle))
+    }
+
+    private func register(_ registration: PreparedAttemptRegistration) {
+        preparations[registration.attempt.id] = registration.preparation
+        lifecycles[registration.attempt.id] = registration.snapshot
+    }
+
     private func merged(_ lhs: AttemptLifecycleMetadata, _ rhs: AttemptLifecycleMetadata) -> AttemptLifecycleMetadata {
         .init(ownership: rhs.ownership ?? lhs.ownership, protocolSessionID: rhs.protocolSessionID ?? lhs.protocolSessionID, worktree: rhs.worktree ?? lhs.worktree)
     }

@@ -73,7 +73,7 @@ public struct ExportService: Sendable {
                 let output = evidenceDirectory.appendingPathComponent(outputName)
                 try copyRegularFile(source, to: output)
                 copiedEvidence.append(try fileRecord(relativePath: relative, at: output))
-                attempt.rawEventFile = relative
+                attempt.rawEventFile = outputName
                 portableRun.agents[agentIndex].attempts[attemptIndex] = attempt
             }
         }

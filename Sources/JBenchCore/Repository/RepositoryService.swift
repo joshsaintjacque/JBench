@@ -142,17 +142,24 @@ public actor RepositoryService {
         }
     }
 
-    public func worktreeChanges(at worktree: URL) throws -> WorktreeChanges {
+    /// Collects changes relative to the immutable commit recorded for the editable run.
+    /// This includes commits made inside a detached worktree, not only its current
+    /// index and working tree state.
+    public func worktreeChanges(at worktree: URL, comparedTo sourceCommit: String = "HEAD") throws -> WorktreeChanges {
         let worktree = worktree.standardizedFileURL
-        let status = try gitResult(["-C", worktree.path, "status", "--porcelain=v1", "-z"])
-        let files = parsePorcelain(status.standardOutput)
-        var patch = try gitResult(["-C", worktree.path, "diff", "--binary", "HEAD"]).standardOutput
+        let status = try gitResult(["-C", worktree.path, "status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        let statusFiles = parsePorcelain(status.standardOutput)
+        let sourceFiles = parseNameStatus(try gitResult(["-C", worktree.path, "diff", "--name-status", "-z", "--no-renames", sourceCommit]).standardOutput)
+        let files = (statusFiles + sourceFiles.filter { sourceFile in
+            !statusFiles.contains { $0.path == sourceFile.path }
+        }).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        var patch = try gitResult(["-C", worktree.path, "diff", "--binary", sourceCommit]).standardOutput
         let untracked = files.filter { $0.status == "??" }
         for file in untracked {
             let path = worktree.appending(path: file.path).standardizedFileURL
             guard path.path.hasPrefix(worktree.path + "/"), fileManager.fileExists(atPath: path.path) else { continue }
             let addition = try gitResult(
-                ["diff", "--binary", "--no-index", "/dev/null", path.path],
+                ["-C", worktree.path, "diff", "--binary", "--no-index", "--src-prefix=a/", "--dst-prefix=b/", "--", "/dev/null", file.path],
                 acceptedExitStatuses: [0, 1]
             ).standardOutput
             patch.append(addition)
@@ -188,6 +195,23 @@ public actor RepositoryService {
             index += renamedOrCopied ? 2 : 1
         }
         return changes.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private func parseNameStatus(_ data: Data) -> [WorktreeChange] {
+        let fields = String(decoding: data, as: UTF8.self)
+            .split(separator: "\0", omittingEmptySubsequences: true)
+            .map(String.init)
+        var changes: [WorktreeChange] = []
+        var index = 0
+        while index + 1 < fields.count {
+            let status = fields[index]
+            let path = fields[index + 1]
+            if !status.isEmpty, !path.isEmpty {
+                changes.append(WorktreeChange(status: status + " ", path: path))
+            }
+            index += 2
+        }
+        return changes
     }
 }
 
@@ -247,7 +271,7 @@ public actor EditableWorktreeService {
         guard snapshot.repositoryRoot == sourceRepository.path else {
             throw RepositoryServiceError.notGitRepository(sourceRepository.path)
         }
-        try ensureGitRegisters(record, expectedCommit: record.sourceCommit)
+        try ensureGitRegisters(record)
 
         if let existing = records[record.id], existing != record {
             throw RepositoryServiceError.worktreeNotRegistered(record.id)
@@ -260,8 +284,8 @@ public actor EditableWorktreeService {
         guard var record = records[id] else { throw RepositoryServiceError.worktreeNotRegistered(id) }
         guard record.disposition == .pending else { throw RepositoryServiceError.worktreeNotPending(id) }
         try validateOwnedPath(URL(filePath: record.ownedWorktreePath))
-        try ensureGitRegisters(record, expectedCommit: record.sourceCommit)
-        let changes = try await repository.worktreeChanges(at: URL(filePath: record.ownedWorktreePath))
+        try ensureGitRegisters(record)
+        let changes = try await repository.worktreeChanges(at: URL(filePath: record.ownedWorktreePath), comparedTo: record.sourceCommit)
         record.changedFileCount = changes.files.count
         records[id] = record
         return changes
@@ -301,7 +325,7 @@ public actor EditableWorktreeService {
         guard resolutionAuthorizations.contains(id) else { throw RepositoryServiceError.attemptStillActive(record.attemptID) }
         let source = URL(filePath: record.ownedWorktreePath).standardizedFileURL
         try validateOwnedPath(source)
-        try ensureGitRegisters(record, expectedCommit: record.sourceCommit)
+        try ensureGitRegisters(record)
         let destination = try validateUserDestination(destination)
         _ = try SystemCommand.run(
             executable: URL(filePath: "/usr/bin/git"),
@@ -339,7 +363,7 @@ public actor EditableWorktreeService {
         let id = record.id
         let source = URL(filePath: record.ownedWorktreePath).standardizedFileURL
         try validateOwnedPath(source)
-        try ensureGitRegisters(record, expectedCommit: record.sourceCommit)
+        try ensureGitRegisters(record)
         _ = try SystemCommand.run(
             executable: URL(filePath: "/usr/bin/git"),
             arguments: ["-C", record.originalRepositoryPath, "worktree", "remove", "--force", source.path]
@@ -373,27 +397,24 @@ public actor EditableWorktreeService {
         return destination
     }
 
-    private func ensureGitRegisters(_ record: WorktreeRecord, expectedCommit: String) throws {
+    /// Confirms only that Git still registers this exact owned path. The worktree
+    /// may legitimately advance HEAD when an agent commits its changes.
+    private func ensureGitRegisters(_ record: WorktreeRecord) throws {
         let expected = URL(filePath: record.ownedWorktreePath).resolvingSymlinksInPath().standardizedFileURL.path
         let lines = try SystemCommand.run(
             executable: URL(filePath: "/usr/bin/git"),
             arguments: ["-C", record.originalRepositoryPath, "worktree", "list", "--porcelain"]
         ).outputText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var currentPath: String?
-        var currentHead: String?
         for line in lines + [""] {
             if line.isEmpty {
-                defer { currentPath = nil; currentHead = nil }
+                defer { currentPath = nil }
                 guard let currentPath else { continue }
                 let resolved = URL(filePath: currentPath).resolvingSymlinksInPath().standardizedFileURL.path
                 guard resolved == expected else { continue }
-                guard currentHead == expectedCommit else {
-                    throw RepositoryServiceError.repositoryChanged(expected: expectedCommit, actual: currentHead)
-                }
                 return
             }
             if line.hasPrefix("worktree ") { currentPath = String(line.dropFirst("worktree ".count)) }
-            if line.hasPrefix("HEAD ") { currentHead = String(line.dropFirst("HEAD ".count)) }
         }
         throw RepositoryServiceError.worktreeNotRegistered(record.id)
     }

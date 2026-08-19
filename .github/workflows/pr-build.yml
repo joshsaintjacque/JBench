@@ -1,0 +1,107 @@
+name: PR Build
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: macos-26
+    timeout-minutes: 20
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      artifact_url: ${{ steps.upload.outputs.artifact-url }}
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build the test app
+        run: ./script/package_app.sh --configuration release --adhoc-sign
+
+      - name: Name the artifact
+        id: artifact
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA:0:7}"
+          echo "name=JBench-PR-${{ github.event.pull_request.number }}-$short_sha-attempt-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive the app
+        run: |
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            dist/JBench.app \
+            "dist/${{ steps.artifact.outputs.name }}.zip"
+
+      - name: Upload the test build
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist/${{ steps.artifact.outputs.name }}.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Add download instructions
+        shell: bash
+        run: |
+          {
+            echo "### JBench test build"
+            echo
+            echo "[Download ${{ steps.artifact.outputs.name }}](${{ steps.upload.outputs.artifact-url }})"
+            echo
+            echo "This build is ad-hoc signed, not notarized. Open JBench once. If macOS blocks it, open **System Settings > Privacy & Security**, find the JBench message, then select **Open Anyway**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  comment:
+    name: Link test build on PR
+    needs: build
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Create or update the test build comment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+          ARTIFACT_URL: ${{ needs.build.outputs.artifact_url }}
+        run: |
+          marker="<!-- jbench-test-build -->"
+          instructions="This ad-hoc signed build is available for 14 days. Open JBench once. If macOS blocks it, open **System Settings > Privacy & Security**, find the JBench message, then select **Open Anyway**."
+          printf -v body '%s\n\n### JBench test build\n\n[Download `%s`](%s)\n\n%s' \
+            "$marker" "$ARTIFACT_NAME" "$ARTIFACT_URL" "$instructions"
+
+          comment_id="$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --jq '.[] | select(.body | startswith("<!-- jbench-test-build -->")) | .id' | \
+              /usr/bin/head -n 1
+          )"
+
+          if [[ -n "$comment_id" ]]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+              --raw-field body="$body" >/dev/null
+          else
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --raw-field body="$body" >/dev/null
+          fi

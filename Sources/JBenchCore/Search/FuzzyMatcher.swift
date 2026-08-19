@@ -25,57 +25,51 @@ public enum FuzzyMatcher {
         }
 
         let lowerQuery = trimmedQuery.lowercased()
-        let lowerTarget = target.lowercased()
 
         // 1. Exact match (case-insensitive)
-        if lowerQuery == lowerTarget {
+        if target.caseInsensitiveCompare(trimmedQuery) == .orderedSame {
             return (score: 1000, matchedRanges: [target.startIndex..<target.endIndex])
         }
 
         // 2. Exact prefix match
-        if lowerTarget.hasPrefix(lowerQuery) {
-            let endIndex = target.index(target.startIndex, offsetBy: lowerQuery.count)
+        if let prefixRange = target.range(of: trimmedQuery, options: [.caseInsensitive, .anchored]) {
             let baseScore = 800 - target.count
-            return (score: max(500, baseScore), matchedRanges: [target.startIndex..<endIndex])
+            return (score: max(500, baseScore), matchedRanges: [prefixRange])
         }
 
         // 3. Contiguous substring match
-        if let subRange = lowerTarget.range(of: lowerQuery) {
-            let startOffset = lowerTarget.distance(from: lowerTarget.startIndex, to: subRange.lowerBound)
-            let targetStartIndex = target.index(target.startIndex, offsetBy: startOffset)
-            let targetEndIndex = target.index(targetStartIndex, offsetBy: lowerTarget.distance(from: subRange.lowerBound, to: subRange.upperBound))
-
+        if let subRange = target.range(of: trimmedQuery, options: .caseInsensitive) {
+            let startOffset = target.distance(from: target.startIndex, to: subRange.lowerBound)
             var score = 600 - (startOffset * 4) - (target.count - trimmedQuery.count)
             // Word boundary bonus if starts after a delimiter
             if startOffset > 0 {
-                let prevChar = target[target.index(before: targetStartIndex)]
+                let prevChar = target[target.index(before: subRange.lowerBound)]
                 if ["/", "-", "_", ".", " ", ":", "@"].contains(prevChar) {
                     score += 160
                 }
             }
-            return (score: max(300, score), matchedRanges: [targetStartIndex..<targetEndIndex])
+            return (score: max(300, score), matchedRanges: [subRange])
         }
 
         // 4. Token-based matching (e.g. "kimi code" or "deepseek flash")
-        let queryTokens = trimmedQuery.split { $0.isWhitespace || $0 == "-" || $0 == "_" || $0 == "/" }.map { String($0).lowercased() }
+        let queryTokens = trimmedQuery.split { $0.isWhitespace || $0 == "-" || $0 == "_" || $0 == "/" }.map { String($0) }
         if queryTokens.count > 1 {
             var allMatched = true
             var tokenRanges: [Range<String.Index>] = []
             var tokenScore = 400
+            var searchStart = target.startIndex
 
             for token in queryTokens {
-                if let range = lowerTarget.range(of: token) {
-                    let startOffset = lowerTarget.distance(from: lowerTarget.startIndex, to: range.lowerBound)
-                    let targetStart = target.index(target.startIndex, offsetBy: startOffset)
-                    let targetEnd = target.index(targetStart, offsetBy: lowerTarget.distance(from: range.lowerBound, to: range.upperBound))
-                    tokenRanges.append(targetStart..<targetEnd)
-
+                if let range = target.range(of: token, options: .caseInsensitive, range: searchStart..<target.endIndex) ?? target.range(of: token, options: .caseInsensitive) {
+                    tokenRanges.append(range)
+                    let startOffset = target.distance(from: target.startIndex, to: range.lowerBound)
                     if startOffset > 0 {
-                        let prevChar = target[target.index(before: targetStart)]
+                        let prevChar = target[target.index(before: range.lowerBound)]
                         if ["/", "-", "_", ".", " ", ":", "@"].contains(prevChar) {
                             tokenScore += 40
                         }
                     }
+                    searchStart = range.upperBound
                 } else {
                     allMatched = false
                     break
@@ -97,11 +91,12 @@ public enum FuzzyMatcher {
         for queryChar in lowerQuery {
             var found = false
             while targetIndex < target.endIndex {
-                let lowerCurrChar = lowerTarget[targetIndex]
+                let currentChar = target[targetIndex]
+                let lowerCurrentChars = currentChar.lowercased()
                 let isWordBoundary = (targetIndex == target.startIndex) ||
                     ["/", "-", "_", ".", " ", ":", "@"].contains(target[target.index(before: targetIndex)])
 
-                if lowerCurrChar == queryChar {
+                if lowerCurrentChars.contains(queryChar) {
                     found = true
                     matchedIndices.append(targetIndex)
 

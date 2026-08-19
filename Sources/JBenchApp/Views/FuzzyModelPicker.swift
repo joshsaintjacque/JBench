@@ -62,6 +62,8 @@ public struct FuzzyModelPicker: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Model")
+        .accessibilityValue(selectedModel.isEmpty ? "None" : selectedModel)
         .help(selectedModel)
         .popover(isPresented: $isShowingPopover, arrowEdge: .bottom) {
             popoverContent
@@ -219,6 +221,11 @@ public struct FuzzyModelPicker: View {
                             withAnimation(.easeInOut(duration: 0.1)) {
                                 proxy.scrollTo(filteredResults[newIndex].item, anchor: .center)
                             }
+                        }
+                    }
+                    .onAppear {
+                        if filteredResults.indices.contains(highlightedIndex) {
+                            proxy.scrollTo(filteredResults[highlightedIndex].item, anchor: .center)
                         }
                     }
                 }

@@ -91,4 +91,18 @@ import Foundation
         #expect(!results.contains { $0.item == "hpc-ai/minimax/minimax-m2.5" })
         #expect(!results.contains { $0.item == "hpc-ai/openai/gpt-5.5" })
     }
+
+    @Test func unicodeCaseExpansionDoesNotCrash() {
+        // "Aİ" lowercased in Turkish/Unicode expands to multiple code points/different indexing
+        let match = FuzzyMatcher.match(query: "Aa", in: "Aİ")
+        #expect(match == nil)
+
+        let matchingResult = FuzzyMatcher.match(query: "ai", in: "Aİ")
+        // Should not crash, and if matched or not, matched ranges must be valid in the original target
+        if let matchingResult {
+            for range in matchingResult.matchedRanges {
+                _ = "Aİ"[range]
+            }
+        }
+    }
 }

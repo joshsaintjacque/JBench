@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           short_sha="${GITHUB_SHA:0:7}"
-          echo "name=JBench-PR-${{ github.event.pull_request.number }}-$short_sha" >> "$GITHUB_OUTPUT"
+          echo "name=JBench-PR-${{ github.event.pull_request.number }}-$short_sha-attempt-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
 
       - name: Archive the app
         run: |
@@ -60,5 +60,5 @@ jobs:
             echo
             echo "[Download ${{ steps.artifact.outputs.name }}](${{ steps.upload.outputs.artifact-url }})"
             echo
-            echo "This build is ad-hoc signed, not notarized. macOS may require right-clicking the app and selecting **Open**."
+            echo "This build is ad-hoc signed, not notarized. Open JBench once. If macOS blocks it, open **System Settings > Privacy & Security**, find the JBench message, then select **Open Anyway**."
           } >> "$GITHUB_STEP_SUMMARY"

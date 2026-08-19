@@ -61,7 +61,7 @@ struct RunLifecycleTests {
             AgentConfiguration(harness: .fake, model: "one", timeoutSeconds: nil),
             AgentConfiguration(harness: .fake, model: "two", timeoutSeconds: nil)
         ]))
-        try await Task.sleep(for: .milliseconds(30))
+        try await Task.sleep(for: .milliseconds(100))
         let report = await coordinator.shutdown()
         let persisted = try #require(await coordinator.run(id: run.id))
 

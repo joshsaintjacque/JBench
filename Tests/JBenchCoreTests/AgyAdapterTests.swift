@@ -58,4 +58,22 @@ struct AgyAdapterTests {
         let result = await adapter.shutdown(attemptID: UUID())
         #expect(result.completedGracefully)
     }
+
+    @Test func rejectsInteractiveApprovalInEditableMode() async {
+        let adapter = AgyAdapter(executablePath: "/usr/bin/true")
+        let request = HarnessRequest(
+            attemptID: UUID(),
+            directoryPath: NSTemporaryDirectory(),
+            prompt: "Test",
+            executionMode: .editable,
+            configuration: AgentConfiguration(harness: .agy, model: "gemini-3.7-flash", approvalPolicy: .askEveryTime)
+        )
+        let stream = await adapter.events(for: request)
+        do {
+            for try await _ in stream {}
+            Issue.record("Expected error for askEveryTime in editable mode")
+        } catch {
+            #expect(error.localizedDescription.contains("interactive approval"))
+        }
+    }
 }

@@ -84,7 +84,6 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
             "--print", request.prompt,
             "--model", request.configuration.model,
             "--add-dir", request.directoryPath,
-            "--dangerously-skip-permissions",
             "--output-format", "stream-json"
         ]
 
@@ -94,6 +93,16 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
 
         if request.executionMode == .readOnly {
             arguments.append("--sandbox")
+        } else {
+            switch request.configuration.approvalPolicy {
+            case .allowForAttempt:
+                arguments.append("--dangerously-skip-permissions")
+            case .denyAll:
+                arguments.append("--sandbox")
+            case .askEveryTime:
+                continuation.finish(throwing: JBenchCoreError.storage("Antigravity CLI does not support interactive approval prompts in batch execution. Select 'Allow for attempt' or 'Deny all'."))
+                return
+            }
         }
 
         let process = Process()
@@ -125,12 +134,29 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
 
         process.terminationHandler = { [weak self] ended in
             Task {
-                await self?.processTerminated(status: ended.terminationStatus, attemptID: request.attemptID, continuation: continuation)
+                await self?.processTerminated(
+                    status: ended.terminationStatus,
+                    attemptID: request.attemptID,
+                    stdout: stdout,
+                    stderr: stderr,
+                    continuation: continuation
+                )
             }
         }
 
         do {
             try process.run()
+            let identity = OwnedProcessService.identity(for: process.processIdentifier)
+            let ownership = ProcessOwnership(
+                processID: process.processIdentifier,
+                processIdentity: identity?.serialized ?? "pid=\(process.processIdentifier);identity=unavailable"
+            )
+            continuation.yield(AdapterEvent(
+                kind: .lifecycle,
+                lifecycle: AttemptLifecycleMetadata(ownership: ownership),
+                rawJSON: "{\"event\":\"processStarted\",\"pid\":\(process.processIdentifier)}"
+            ))
+            continuation.yield(AdapterEvent(kind: .started, rawJSON: "{\"event\":\"started\"}"))
             let attempt = ActiveAttempt(
                 process: process,
                 continuation: continuation,
@@ -233,9 +259,35 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
     private func processTerminated(
         status: Int32,
         attemptID: UUID,
+        stdout: Pipe,
+        stderr: Pipe,
         continuation: AsyncThrowingStream<AdapterEvent, Error>.Continuation
     ) {
-        outputBuffers.removeValue(forKey: attemptID)
+        stdout.fileHandleForReading.readabilityHandler = nil
+        stderr.fileHandleForReading.readabilityHandler = nil
+
+        let remainingStdout = stdout.fileHandleForReading.readDataToEndOfFile()
+        if !remainingStdout.isEmpty {
+            var buffer = outputBuffers[attemptID] ?? Data()
+            buffer.append(remainingStdout)
+            outputBuffers[attemptID] = buffer
+        }
+
+        let remainingStderr = stderr.fileHandleForReading.readDataToEndOfFile()
+        if !remainingStderr.isEmpty {
+            var buffer = stderrBuffers[attemptID] ?? Data()
+            buffer.append(remainingStderr)
+            stderrBuffers[attemptID] = buffer
+        }
+
+        if let buffer = outputBuffers.removeValue(forKey: attemptID), !buffer.isEmpty {
+            if let text = String(data: buffer, encoding: .utf8), !text.isEmpty {
+                for line in text.components(separatedBy: .newlines) where !line.isEmpty {
+                    parseLine(line, continuation: continuation)
+                }
+            }
+        }
+
         let stderrData = stderrBuffers.removeValue(forKey: attemptID) ?? Data()
         let stderrText = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         _ = attempts.removeValue(forKey: attemptID)
@@ -268,11 +320,17 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         process.standardError = stderr
         try process.run()
         process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw JBenchCoreError.storage("Antigravity CLI version probe failed with status \(process.terminationStatus): \(errText)")
+        }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? String(data: errData, encoding: .utf8) ?? ""
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "1.1.15" : trimmed
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !output.isEmpty else {
+            throw JBenchCoreError.storage("Antigravity CLI version probe returned empty output.")
+        }
+        return output
     }
 
     public static func defaultCatalog() -> [ModelCatalogEntry] {

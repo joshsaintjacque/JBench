@@ -74,6 +74,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: write
+      pull-requests: write
 
     steps:
       - name: Create or update the test build comment

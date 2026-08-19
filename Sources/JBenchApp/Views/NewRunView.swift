@@ -112,17 +112,12 @@ private struct ComposerCard: View {
                 Label(store.repositoryExplanation, systemImage: store.canUseEditable ? "checkmark.circle" : "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(store.canUseEditable ? Color.secondary : Color.orange)
-                HStack {
-                    if store.isDemoMode {
+                if store.isDemoMode {
+                    HStack {
                         Label("Provider-free demo mode", systemImage: "testtube.2")
                             .font(.caption).foregroundStyle(.orange)
                         Spacer()
                         Button("Use local harnesses") { store.leaveDemoMode() }
-                    } else {
-                        Text("Need a safe visual check?")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("Load provider-free demo") { store.loadProviderFreeDemo() }
-                            .controlSize(.small)
                     }
                 }
             }

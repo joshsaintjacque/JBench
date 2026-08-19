@@ -330,19 +330,22 @@ private struct BlindReviewView: View {
                 .textFieldStyle(.roundedBorder).lineLimit(2...4)
             HStack(spacing: 12) {
                 if store.isRevealOn {
-                    Button {
-                        store.viewActiveRunInHistory()
-                    } label: {
-                        Label("View in History", systemImage: "clock.arrow.circlepath")
-                    }
-                    .buttonStyle(.bordered)
+                    if store.section == .newRun {
+                        Button {
+                            store.viewActiveRunInHistory()
+                        } label: {
+                            Label("View in History", systemImage: "clock.arrow.circlepath")
+                        }
+                        .buttonStyle(.bordered)
 
-                    Button {
-                        store.startNewRun()
-                    } label: {
-                        Label("Start New Run", systemImage: "plus.circle")
+                        Button {
+                            store.startNewRun()
+                        } label: {
+                            Label("Start New Run", systemImage: "plus.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isBackgroundRunActive)
                     }
-                    .buttonStyle(.bordered)
 
                     Spacer()
 

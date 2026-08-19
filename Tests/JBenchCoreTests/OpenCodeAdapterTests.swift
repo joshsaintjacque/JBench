@@ -46,12 +46,14 @@ struct OpenCodeAdapterTests {
         {"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"idle"}}}
         """)
         #expect(nestedCompleted.kind == .completed)
+        #expect(nestedCompleted.sessionID == "ses_1")
         #expect(nestedCompleted.isTerminal)
 
         let sessionIdle = OpenCodeWireParser.parseEvent("""
         {"type":"session.idle","properties":{"sessionID":"ses_1"}}
         """)
         #expect(sessionIdle.kind == .completed)
+        #expect(sessionIdle.sessionID == "ses_1")
         #expect(sessionIdle.isTerminal)
 
         let failed = OpenCodeWireParser.parseEvent("""

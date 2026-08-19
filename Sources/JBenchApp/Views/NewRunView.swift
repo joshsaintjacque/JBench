@@ -190,15 +190,18 @@ private struct ConfigurationRow: View {
             .onChange(of: configuration.harness) { _, _ in store.normalizeConfiguration(configuration.id) }
             .labelsHidden()
             .frame(width: 120)
-            Picker("Model", selection: $configuration.model) {
-                if configuration.harness == .fake {
-                    Text(configuration.model).tag(configuration.model)
-                } else {
-                    ForEach(store.models(for: configuration.harness), id: \.self) { Text($0).tag($0) }
-                }
-            }
-            .labelsHidden()
-            .frame(width: 145)
+            FuzzyModelPicker(
+                harness: configuration.harness,
+                selectedModel: $configuration.model,
+                availableModels: configuration.harness == .fake
+                    ? [configuration.model]
+                    : store.models(for: configuration.harness),
+                catalogEntries: configuration.harness == .fake
+                    ? []
+                    : store.catalog(for: configuration.harness)
+            )
+            .onChange(of: configuration.model) { _, _ in store.normalizeConfiguration(configuration.id) }
+            .frame(width: 170)
             Picker("Reasoning", selection: Binding(get: { configuration.reasoning ?? "Default" }, set: { configuration.reasoning = $0 == "Default" ? nil : $0 })) {
                 ForEach(configuration.harness == .fake ? ["Default", "Deterministic"] : store.reasoningValues(for: configuration), id: \.self) { Text($0).tag($0) }
             }

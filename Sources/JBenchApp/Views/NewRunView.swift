@@ -170,8 +170,8 @@ private struct ConfigurationRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: configuration.harness == .codex ? "sparkles" : "hexagon.fill")
-                .foregroundStyle(configuration.harness == .codex ? .blue : .orange)
+            Image(systemName: harnessIcon)
+                .foregroundStyle(harnessColor)
                 .frame(width: 24)
             Text("\(number).")
                 .foregroundStyle(.secondary)
@@ -179,6 +179,7 @@ private struct ConfigurationRow: View {
             Picker("Harness", selection: $configuration.harness) {
                 Text("Codex").tag(HarnessKind.codex)
                 Text("OpenCode").tag(HarnessKind.openCode)
+                Text("Antigravity (agy)").tag(HarnessKind.agy)
                 if store.isDemoMode { Text("Demo").tag(HarnessKind.fake) }
             }
             .onChange(of: configuration.harness) { _, _ in store.normalizeConfiguration(configuration.id) }
@@ -218,5 +219,23 @@ private struct ConfigurationRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var harnessIcon: String {
+        switch configuration.harness {
+        case .codex: "sparkles"
+        case .openCode: "hexagon.fill"
+        case .agy: "atom"
+        case .fake: "testtube.2"
+        }
+    }
+
+    private var harnessColor: Color {
+        switch configuration.harness {
+        case .codex: .blue
+        case .openCode: .orange
+        case .agy: .teal
+        case .fake: .gray
+        }
     }
 }

@@ -3,6 +3,7 @@ import Foundation
 public enum HarnessKind: String, Codable, CaseIterable, Sendable, Hashable {
     case codex
     case openCode
+    case agy
     case fake
 }
 

@@ -20,11 +20,12 @@ final class JBenchAppDelegate: NSObject, NSApplicationDelegate {
               arguments.indices.contains(flagIndex + 1) else { return }
         let destination = URL(fileURLWithPath: arguments[flagIndex + 1])
 
-        let store = JBenchAppStore(automaticallyRunsDemo: false)
-        let controller = NSHostingController(rootView: NewRunView(store: store))
+        let snapshotAppearance = snapshotAppearance(from: arguments)
+        let store = JBenchAppStore(automaticallyRunsDemo: false, appearanceOverride: snapshotAppearance)
+        let controller = NSHostingController(rootView: NewRunView(store: store).preferredColorScheme(snapshotAppearance.preferredColorScheme))
         let window = NSWindow(contentViewController: controller)
         window.title = "JBench"
-        window.appearance = NSAppearance(named: .darkAqua)
+        window.appearance = snapshotAppearance.nsAppearance
         window.setContentSize(NSSize(width: 1_420, height: 920))
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -42,6 +43,13 @@ final class JBenchAppDelegate: NSObject, NSApplicationDelegate {
             window.displayIfNeeded()
             capture(window: window, to: destination)
         }
+    }
+
+    private func snapshotAppearance(from arguments: [String]) -> AppAppearance {
+        guard let flagIndex = arguments.firstIndex(of: "--snapshot-appearance"),
+              arguments.indices.contains(flagIndex + 1),
+              let appearance = AppAppearance(rawValue: arguments[flagIndex + 1]) else { return .dark }
+        return appearance
     }
 
     private func capture(window: NSWindow, to destination: URL) {
@@ -66,6 +74,7 @@ final class JBenchAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if snapshotWindow != nil { return .terminateNow }
         guard !isTerminating else { return .terminateLater }
         guard let shutdownHandler else { return .terminateNow }
         isTerminating = true
@@ -86,7 +95,11 @@ struct JBenchApp: App {
     var body: some Scene {
         WindowGroup("JBench", id: "main") {
             ContentView(store: store)
-                .onAppear { appDelegate.shutdownHandler = { await store.shutdownForTermination() } }
+                .preferredColorScheme(store.appearance.preferredColorScheme)
+                .onAppear {
+                    store.applyAppearanceToApplication()
+                    appDelegate.shutdownHandler = { await store.shutdownForTermination() }
+                }
         }
         .defaultSize(width: 1_420, height: 920)
         .commands {
@@ -101,6 +114,7 @@ struct JBenchApp: App {
 
         Settings {
             SettingsView(store: store)
+                .preferredColorScheme(store.appearance.preferredColorScheme)
         }
 
         MenuBarExtra("JBench · \(store.menuBarLabel)", systemImage: store.menuBarIcon) {

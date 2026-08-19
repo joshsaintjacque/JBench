@@ -10,6 +10,12 @@ import JBenchCore
 /// only through the explicit provider-free demo action.
 @Observable @MainActor
 final class JBenchAppStore: JBenchRunService {
+    var appearance: AppAppearance {
+        didSet {
+            applyAppearanceToApplication()
+            if persistsAppearance { Self.saveAppearance(appearance) }
+        }
+    }
     var section: AppSection = .newRun {
         didSet { resetVerdictSelectionForCurrentTarget() }
     }
@@ -65,6 +71,7 @@ final class JBenchAppStore: JBenchRunService {
     var isShowingHistoryTitleRename = false
 
     private let applicationSupport: URL
+    private let persistsAppearance: Bool
     private let historyStore: SQLiteHistoryStore?
     private let evidenceStore: EvidenceStore?
     private let repository = RepositoryService()
@@ -92,7 +99,9 @@ final class JBenchAppStore: JBenchRunService {
         var generatedTemporaryURLs: [URL]
     }
 
-    init(automaticallyRunsDemo: Bool = true) {
+    init(automaticallyRunsDemo: Bool = true, appearanceOverride: AppAppearance? = nil) {
+        persistsAppearance = appearanceOverride == nil
+        appearance = appearanceOverride ?? Self.loadAppearance()
         directory = FileManager.default.currentDirectoryPath
         repositorySnapshot = RepositorySnapshot(state: .missing, inspectedDirectory: FileManager.default.currentDirectoryPath)
         let supportDirectory = Self.applicationSupportDirectory()
@@ -119,6 +128,7 @@ final class JBenchAppStore: JBenchRunService {
 
         discovery = Self.makeDiscovery(settings: initialSettings, cacheURL: supportDirectory.appending(path: "model-catalog.json"))
         rebuildCoordinator()
+        applyAppearanceToApplication()
         Task {
             await loadPersistedState()
             await refreshRepository()
@@ -1177,6 +1187,20 @@ final class JBenchAppStore: JBenchRunService {
         return settings
     }
     private static func saveDiscoverySettings(_ settings: DiscoverySettings) { UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: "JBench.discoverySettings") }
+
+    private static func loadAppearance() -> AppAppearance {
+        guard let rawValue = UserDefaults.standard.string(forKey: "JBench.appearance"),
+              let appearance = AppAppearance(rawValue: rawValue) else { return .system }
+        return appearance
+    }
+
+    private static func saveAppearance(_ appearance: AppAppearance) {
+        UserDefaults.standard.set(appearance.rawValue, forKey: "JBench.appearance")
+    }
+
+    func applyAppearanceToApplication() {
+        NSApp?.appearance = appearance.nsAppearance
+    }
 }
 
 private extension String {

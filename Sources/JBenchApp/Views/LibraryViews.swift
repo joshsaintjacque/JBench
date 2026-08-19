@@ -184,17 +184,54 @@ struct SettingsView: View {
     @Bindable var store: JBenchAppStore
     var body: some View {
         TabView {
-            SettingsDetailView(store: store).tabItem { Label("Harnesses", systemImage: "cpu") }
+            AppearanceSettings(store: store).tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }
+            SettingsDetailView(store: store, showsAppearance: false).tabItem { Label("Harnesses", systemImage: "cpu") }
             NotificationsSettings(store: store).tabItem { Label("Notifications", systemImage: "bell") }
         }
         .frame(width: 620, height: 460)
     }
 }
 
-struct SettingsDetailView: View {
+private struct AppearanceSettings: View {
     @Bindable var store: JBenchAppStore
+
     var body: some View {
         Form {
+            AppearancePreferenceSection(store: store)
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+private struct AppearancePreferenceSection: View {
+    @Bindable var store: JBenchAppStore
+
+    var body: some View {
+        Section("Appearance") {
+            Picker("Appearance", selection: $store.appearance) {
+                ForEach(AppAppearance.allCases) { appearance in
+                    Text(appearance.title).tag(appearance)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("System follows macOS. Light and Dark update JBench and native panels immediately.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct SettingsDetailView: View {
+    @Bindable var store: JBenchAppStore
+    var showsAppearance = true
+
+    var body: some View {
+        Form {
+            if showsAppearance {
+                AppearancePreferenceSection(store: store)
+            }
             Section("Harness diagnostics") {
                 ForEach(store.diagnostics) { diagnostic in
                     VStack(alignment: .leading, spacing: 4) {

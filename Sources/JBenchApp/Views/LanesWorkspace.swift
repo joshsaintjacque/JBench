@@ -266,7 +266,7 @@ private struct WorktreeControls: View {
                 }
                 .frame(minHeight: 100, maxHeight: 240)
                 .padding(8)
-                .background(.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             }
         }
         .padding(9)

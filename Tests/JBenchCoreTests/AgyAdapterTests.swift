@@ -52,4 +52,10 @@ struct AgyAdapterTests {
 
         #expect(canRun)
     }
+
+    @Test func shutdownReturnsGracefulForInactiveAttempt() async {
+        let adapter = AgyAdapter()
+        let result = await adapter.shutdown(attemptID: UUID())
+        #expect(result.completedGracefully)
+    }
 }

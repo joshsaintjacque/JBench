@@ -13,6 +13,7 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
     public let executablePath: String
     private var attempts: [UUID: ActiveAttempt] = [:]
     private var outputBuffers: [UUID: Data] = [:]
+    private var stderrBuffers: [UUID: Data] = [:]
 
     public init(executablePath: String = "/Users/joshs/.local/bin/agy") {
         self.executablePath = executablePath
@@ -49,6 +50,7 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
 
     public func shutdown(attemptID: UUID) async -> HarnessShutdownResult {
         outputBuffers.removeValue(forKey: attemptID)
+        stderrBuffers.removeValue(forKey: attemptID)
         guard let attempt = attempts.removeValue(forKey: attemptID) else {
             return .init(completedGracefully: true, detail: "No owned agy process was active.")
         }
@@ -70,7 +72,11 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         } else if attempt.process.isRunning && pid > 0 {
             _ = Darwin.kill(pid, SIGKILL)
         }
-        return .init(completedGracefully: false, detail: "agy process required SIGKILL fallback.")
+        let exited = await waitForTreeExit(process: attempt.process, timeout: .seconds(1))
+        return .init(
+            completedGracefully: false,
+            detail: exited ? "agy process required SIGKILL fallback." : "agy process did not exit after SIGKILL fallback."
+        )
     }
 
     private func run(request: HarnessRequest, continuation: AsyncThrowingStream<AdapterEvent, Error>.Continuation) async {
@@ -111,8 +117,10 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
             Task { await self?.handleOutput(data: data, attemptID: request.attemptID, continuation: continuation) }
         }
 
-        stderr.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            Task { await self?.handleStderr(data: data, attemptID: request.attemptID) }
         }
 
         process.terminationHandler = { [weak self] ended in
@@ -131,17 +139,15 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
                 reasoning: request.configuration.reasoning
             )
             attempts[request.attemptID] = attempt
-
-            continuation.yield(AdapterEvent(
-                kind: .observedSettings,
-                observed: ObservedSettings(
-                    model: ObservedValue(request.configuration.model, provenance: .harnessReported),
-                    reasoning: ObservedValue(request.configuration.reasoning ?? "Default", provenance: .harnessReported)
-                )
-            ))
         } catch {
             continuation.finish(throwing: JBenchCoreError.storage("Failed to launch agy process: \(error.localizedDescription)"))
         }
+    }
+
+    private func handleStderr(data: Data, attemptID: UUID) {
+        var buffer = stderrBuffers[attemptID] ?? Data()
+        buffer.append(data)
+        stderrBuffers[attemptID] = buffer
     }
 
     private func handleOutput(
@@ -168,14 +174,20 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
             return
         }
 
+        var emittedEvent = false
+
         if let text = json["text"] as? String {
             continuation.yield(AdapterEvent(kind: .outputDelta, text: text, rawJSON: line))
+            emittedEvent = true
         } else if let content = json["content"] as? String {
             continuation.yield(AdapterEvent(kind: .outputDelta, text: content, rawJSON: line))
+            emittedEvent = true
         } else if let delta = json["delta"] as? String {
             continuation.yield(AdapterEvent(kind: .outputDelta, text: delta, rawJSON: line))
+            emittedEvent = true
         } else if let message = json["message"] as? String {
             continuation.yield(AdapterEvent(kind: .outputDelta, text: message, rawJSON: line))
+            emittedEvent = true
         }
 
         if let usage = json["usage"] as? [String: Any] {
@@ -191,7 +203,30 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
                     ),
                     rawJSON: line
                 ))
+                emittedEvent = true
             }
+        }
+
+        if let model = json["model"] as? String {
+            let reasoning = json["effort"] as? String ?? json["reasoning_effort"] as? String
+            continuation.yield(AdapterEvent(
+                kind: .observedSettings,
+                observed: ObservedSettings(
+                    model: ObservedValue(model, provenance: .harnessReported),
+                    reasoning: reasoning != nil ? ObservedValue(reasoning, provenance: .harnessReported) : .unavailable
+                ),
+                rawJSON: line
+            ))
+            emittedEvent = true
+        }
+
+        if !emittedEvent {
+            let activity = (json["type"] as? String) ?? (json["event"] as? String) ?? (json["role"] as? String)
+            continuation.yield(AdapterEvent(
+                kind: .activity,
+                text: activity,
+                rawJSON: line
+            ))
         }
     }
 
@@ -201,12 +236,25 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
         continuation: AsyncThrowingStream<AdapterEvent, Error>.Continuation
     ) {
         outputBuffers.removeValue(forKey: attemptID)
+        let stderrData = stderrBuffers.removeValue(forKey: attemptID) ?? Data()
+        let stderrText = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         _ = attempts.removeValue(forKey: attemptID)
+
         if status == 0 {
             continuation.yield(AdapterEvent(kind: .completed, text: ""))
             continuation.finish()
         } else {
-            continuation.finish(throwing: JBenchCoreError.storage("agy process exited with status \(status)."))
+            let message = !stderrText.isEmpty
+                ? "agy process exited with status \(status): \(stderrText)"
+                : "agy process exited with status \(status)."
+            if !stderrText.isEmpty {
+                continuation.yield(AdapterEvent(
+                    kind: .activity,
+                    text: stderrText,
+                    rawJSON: "{\"stderr\":\(stderrText.debugDescription)}"
+                ))
+            }
+            continuation.finish(throwing: JBenchCoreError.storage(message))
         }
     }
 

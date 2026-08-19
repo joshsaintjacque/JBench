@@ -236,7 +236,24 @@ struct SettingsDetailView: View {
             Section("Harness diagnostics") {
                 ForEach(store.diagnostics) { diagnostic in
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack { Image(systemName: diagnostic.harness == .codex ? "sparkles" : "hexagon.fill").foregroundStyle(.tint); Text(diagnostic.harness == .codex ? "Codex" : "OpenCode").font(.headline); Spacer(); Label(diagnostic.status == .ready ? "Ready" : "Unavailable", systemImage: diagnostic.status == .ready ? "checkmark.circle.fill" : "xmark.circle.fill").foregroundStyle(diagnostic.status == .ready ? .green : .red) }
+                        let harnessIcon: String = switch diagnostic.harness {
+                        case .codex: "sparkles"
+                        case .openCode: "hexagon.fill"
+                        case .agy: "arrow.triangle.2.circlepath"
+                        case .fake: "theatermasks.fill"
+                        }
+                        let harnessTitle: String = switch diagnostic.harness {
+                        case .codex: "Codex"
+                        case .openCode: "OpenCode"
+                        case .agy: "Antigravity"
+                        case .fake: "Demo"
+                        }
+                        HStack {
+                            Image(systemName: harnessIcon).foregroundStyle(.tint)
+                            Text(harnessTitle).font(.headline)
+                            Spacer()
+                            Label(diagnostic.status == .ready ? "Ready" : "Unavailable", systemImage: diagnostic.status == .ready ? "checkmark.circle.fill" : "xmark.circle.fill").foregroundStyle(diagnostic.status == .ready ? .green : .red)
+                        }
                         Text("\(diagnostic.version) · \(diagnostic.path)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         Text(diagnostic.discovery).font(.caption).foregroundStyle(.secondary)
                         if diagnostic.status != .ready {

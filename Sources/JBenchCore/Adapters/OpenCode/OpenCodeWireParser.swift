@@ -24,7 +24,7 @@ enum OpenCodeWireParser {
         if loweredType.contains("session.error") || loweredType.hasSuffix(".error") {
             return .init(kind: .failed, text: string(in: root, paths: [["properties", "error", "message"], ["properties", "message"], ["error", "message"], ["message"]]))
         }
-        if loweredType.contains("session.status"), string(in: root, paths: [["properties", "status"], ["status"]])?.lowercased() == "idle" {
+        if loweredType == "session.idle" || (loweredType.contains("session.status") && string(in: root, paths: [["properties", "status", "type"], ["status", "type"], ["properties", "status"], ["status"]])?.lowercased() == "idle") {
             return .init(kind: .completed)
         }
         if loweredType.contains("permission") {

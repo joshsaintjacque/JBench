@@ -328,10 +328,34 @@ private struct BlindReviewView: View {
             }
             TextField("Why this response won (optional)", text: $store.reviewNote, axis: .vertical)
                 .textFieldStyle(.roundedBorder).lineLimit(2...4)
-            HStack {
-                Button("Skip verdict and reveal") { store.skipManualVerdict() }
-                Spacer()
-                Button("Save manual verdict") { store.saveManualVerdict() }.buttonStyle(.borderedProminent).disabled(store.winningLaneID == nil)
+            HStack(spacing: 12) {
+                if store.isRevealOn {
+                    Button {
+                        store.viewActiveRunInHistory()
+                    } label: {
+                        Label("View in History", systemImage: "clock.arrow.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        store.startNewRun()
+                    } label: {
+                        Label("Start New Run", systemImage: "plus.circle")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    Button("Update verdict") { store.saveManualVerdict() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.winningLaneID == nil)
+                } else {
+                    Button("Skip verdict and reveal") { store.skipManualVerdict() }
+                    Spacer()
+                    Button("Save manual verdict") { store.saveManualVerdict() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.winningLaneID == nil)
+                }
             }
         }
         .padding(16)

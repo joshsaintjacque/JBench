@@ -435,6 +435,7 @@ final class JBenchAppStore: JBenchRunService {
                 try await historyStore?.saveVerdict(verdict)
                 verdicts[run.id] = verdict
                 isRevealOn = true
+                await loadHistory()
                 statusMessage = "Manual verdict saved"
             } catch { statusMessage = actionable(error) }
         }
@@ -457,9 +458,27 @@ final class JBenchAppStore: JBenchRunService {
                 verdicts[targetID] = verdict
                 winningLaneID = nil
                 isRevealOn = true
+                await loadHistory()
                 statusMessage = "Verdict skipped. Identities revealed."
             } catch { statusMessage = actionable(error) }
         }
+    }
+
+    func viewActiveRunInHistory() {
+        if let activeRunID {
+            selectedHistoryID = activeRunID
+        }
+        section = .history
+    }
+
+    func startNewRun() {
+        activeRunID = nil
+        activeRun = nil
+        lanes = []
+        isRevealOn = false
+        winningLaneID = nil
+        reviewNote = ""
+        section = .newRun
     }
 
     func loadVerdictForSelectedHistory() {

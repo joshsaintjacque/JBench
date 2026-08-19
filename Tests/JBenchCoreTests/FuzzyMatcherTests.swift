@@ -74,4 +74,21 @@ import Foundation
             #expect(matchedText.lowercased() == "deepseek")
         }
     }
+
+    @Test func complexDelimitedQueryMatchesCorrectly() {
+        let candidates = [
+            "hpc-ai/minimax/minimax-m2.5",
+            "hpc-ai/deepseek/deepseek-v4-pro",
+            "hpc-ai/openai/gpt-5.5",
+            "hpc-ai/moonshotai/kimi-k2.5",
+            "kenari/deepseek-v4-flash:free",
+            "unorouter/deepseek-v4-pro:free",
+            "opencode/deepseek-v4-flash-free"
+        ]
+        let results = FuzzyMatcher.filter(query: "deepseek-v4-free", candidates: candidates)
+        #expect(results.count == 3)
+        #expect(results.map(\.item).allSatisfy { $0.contains("free") && $0.contains("deepseek-v4") })
+        #expect(!results.contains { $0.item == "hpc-ai/minimax/minimax-m2.5" })
+        #expect(!results.contains { $0.item == "hpc-ai/openai/gpt-5.5" })
+    }
 }

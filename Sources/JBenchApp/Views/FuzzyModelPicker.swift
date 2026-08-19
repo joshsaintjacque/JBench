@@ -210,14 +210,15 @@ public struct FuzzyModelPicker: View {
                                         hoveredModel = nil
                                     }
                                 }
-                                .id(index)
                             }
                         }
                         .padding(.vertical, 2)
                     }
                     .onChange(of: highlightedIndex) { _, newIndex in
-                        withAnimation(.easeInOut(duration: 0.1)) {
-                            proxy.scrollTo(newIndex, anchor: .center)
+                        if filteredResults.indices.contains(newIndex) {
+                            withAnimation(.easeInOut(duration: 0.1)) {
+                                proxy.scrollTo(filteredResults[newIndex].item, anchor: .center)
+                            }
                         }
                     }
                 }

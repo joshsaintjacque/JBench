@@ -71,27 +71,21 @@ struct LanesWorkspace: View {
     @ViewBuilder
     private var overallStatusView: some View {
         if !lanes.isEmpty {
-            let activeLanes = lanes.filter { !$0.state.isTerminal }
-            let completedLanes = lanes.filter { $0.state == .completed }
-            let failedLanes = lanes.filter { $0.state == .failed || $0.state == .timedOut }
+            let runningCount = lanes.filter { $0.state == .running || $0.state == .starting }.count
+            let approvalCount = lanes.filter { $0.state == .waitingForApproval }.count
+            let queuedCount = lanes.filter { $0.state == .queued }.count
+            let completedCount = lanes.filter { $0.state == .completed }.count
+            let failedCount = lanes.filter { $0.state == .failed || $0.state == .timedOut }.count
+            let cancelledCount = lanes.filter { $0.state == .cancelled }.count
+            let interruptedCount = lanes.filter { $0.state == .interrupted }.count
+            let stoppedCount = cancelledCount + interruptedCount
 
-            if !activeLanes.isEmpty {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.mini)
-                    Text("Running \(activeLanes.count) of \(lanes.count) agents…")
-                        .font(.caption.bold())
-                        .foregroundStyle(.blue)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Color.blue.opacity(0.1), in: Capsule())
-                .overlay { Capsule().strokeBorder(Color.blue.opacity(0.25), lineWidth: 0.5) }
-            } else if !failedLanes.isEmpty && !completedLanes.isEmpty {
+            if approvalCount > 0 {
                 HStack(spacing: 5) {
-                    Image(systemName: "exclamationmark.triangle.fill")
+                    Image(systemName: "hand.raised.fill")
                         .font(.caption2)
                         .foregroundStyle(.orange)
-                    Text("\(completedLanes.count) done, \(failedLanes.count) failed")
+                    Text(approvalCount == 1 ? "Approval needed for 1 agent" : "Approval needed for \(approvalCount) agents")
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
                 }
@@ -99,20 +93,31 @@ struct LanesWorkspace: View {
                 .padding(.vertical, 4)
                 .background(Color.orange.opacity(0.1), in: Capsule())
                 .overlay { Capsule().strokeBorder(Color.orange.opacity(0.25), lineWidth: 0.5) }
-            } else if failedLanes.count == lanes.count {
-                HStack(spacing: 5) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                    Text("All agents failed")
+            } else if runningCount > 0 {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("Running \(runningCount) of \(lanes.count) agents…")
                         .font(.caption.bold())
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.blue)
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
-                .background(Color.red.opacity(0.1), in: Capsule())
-                .overlay { Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5) }
-            } else {
+                .background(Color.blue.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.blue.opacity(0.25), lineWidth: 0.5) }
+            } else if queuedCount > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Queued \(queuedCount) of \(lanes.count) agents…")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5) }
+            } else if completedCount == lanes.count {
                 HStack(spacing: 5) {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption2)
@@ -125,6 +130,67 @@ struct LanesWorkspace: View {
                 .padding(.vertical, 4)
                 .background(Color.green.opacity(0.1), in: Capsule())
                 .overlay { Capsule().strokeBorder(Color.green.opacity(0.25), lineWidth: 0.5) }
+            } else if failedCount == lanes.count {
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    Text("All agents failed")
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5) }
+            } else if stoppedCount == lanes.count {
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(interruptedCount > 0 ? "Run interrupted" : "All agents cancelled")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5) }
+            } else if completedCount > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    let summaryText: String = {
+                        if failedCount > 0 && stoppedCount > 0 {
+                            return "\(completedCount) done, \(failedCount) failed, \(stoppedCount) stopped"
+                        } else if failedCount > 0 {
+                            return "\(completedCount) done, \(failedCount) failed"
+                        } else {
+                            return "\(completedCount) done, \(stoppedCount) stopped"
+                        }
+                    }()
+                    Text(summaryText)
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.orange.opacity(0.25), lineWidth: 0.5) }
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    Text("\(failedCount) failed, \(stoppedCount) stopped")
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5) }
             }
         }
     }

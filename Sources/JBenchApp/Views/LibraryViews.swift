@@ -25,56 +25,80 @@ struct HistoryView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(filtered, selection: $store.selectedHistoryID) { item in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title).lineLimit(2)
-                    HStack { StateBadge(state: item.state); Text(item.date, format: .dateTime.month(.abbreviated).day().hour().minute()).font(.caption).foregroundStyle(.secondary) }
-                    HStack(spacing: 5) {
-                        Text(URL(fileURLWithPath: item.directory).lastPathComponent).lineLimit(1)
-                        Text("· \(item.lanes.count) agents")
-                        if store.hasVerdict(for: item.id) { Image(systemName: "star.fill").foregroundStyle(.orange) }
-                    }
-                    .font(.caption2).foregroundStyle(.secondary)
-                }
-                .tag(item.id)
-            }
-            .navigationTitle("History")
-            .searchable(text: $search, prompt: "Search runs")
-            .safeAreaInset(edge: .bottom) {
-                DisclosureGroup("Filters") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        TextField("Directory", text: $directoryFilter)
-                        TextField("Model", text: $modelFilter)
-                        Picker("Harness", selection: $harnessFilter) {
-                            Text("Any harness").tag(HarnessKind?.none)
-                            Text("Codex").tag(HarnessKind?.some(.codex))
-                            Text("OpenCode").tag(HarnessKind?.some(.openCode))
-                            Text("Antigravity (agy)").tag(HarnessKind?.some(.agy))
+        HSplitView {
+            VStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search runs", text: $search)
+                        .textFieldStyle(.plain)
+                    if !search.isEmpty {
+                        Button {
+                            search = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
                         }
-                        Toggle("Has verdict", isOn: $verdictOnly)
-                        Toggle("Date range", isOn: $useDateRange)
-                        if useDateRange {
-                            DatePicker("From", selection: $fromDate, displayedComponents: .date)
-                            DatePicker("To", selection: $toDate, displayedComponents: .date)
-                        }
-                        Button("Delete All History", role: .destructive) { store.prepareDeleteAllHistory() }
-                            .disabled(store.history.isEmpty)
+                        .buttonStyle(.plain)
                     }
-                    .textFieldStyle(.roundedBorder)
-                    .padding(10)
                 }
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-                .background(.bar)
+                .padding(8)
+                .background(Color(nsColor: .controlBackgroundColor))
+
+                Divider()
+
+                List(filtered, selection: $store.selectedHistoryID) { item in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.title).lineLimit(2)
+                        HStack { StateBadge(state: item.state); Text(item.date, format: .dateTime.month(.abbreviated).day().hour().minute()).font(.caption).foregroundStyle(.secondary) }
+                        HStack(spacing: 5) {
+                            Text(URL(fileURLWithPath: item.directory).lastPathComponent).lineLimit(1)
+                            Text("· \(item.lanes.count) agents")
+                            if store.hasVerdict(for: item.id) { Image(systemName: "star.fill").foregroundStyle(.orange) }
+                        }
+                        .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .tag(item.id)
+                }
+                .listStyle(.inset)
+                .safeAreaInset(edge: .bottom) {
+                    DisclosureGroup("Filters") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Directory", text: $directoryFilter)
+                            TextField("Model", text: $modelFilter)
+                            Picker("Harness", selection: $harnessFilter) {
+                                Text("Any harness").tag(HarnessKind?.none)
+                                Text("Codex").tag(HarnessKind?.some(.codex))
+                                Text("OpenCode").tag(HarnessKind?.some(.openCode))
+                                Text("Antigravity (agy)").tag(HarnessKind?.some(.agy))
+                            }
+                            Toggle("Has verdict", isOn: $verdictOnly)
+                            Toggle("Date range", isOn: $useDateRange)
+                            if useDateRange {
+                                DatePicker("From", selection: $fromDate, displayedComponents: .date)
+                                DatePicker("To", selection: $toDate, displayedComponents: .date)
+                            }
+                            Button("Delete All History", role: .destructive) { store.prepareDeleteAllHistory() }
+                                .disabled(store.history.isEmpty)
+                        }
+                        .textFieldStyle(.roundedBorder)
+                        .padding(10)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                    .background(.bar)
+                }
             }
-            .frame(minWidth: 280)
-        } detail: {
-            if let item = store.selectedHistory ?? filtered.first {
-                HistoryDetail(store: store, item: item)
-            } else {
-                ContentUnavailableView("No matching runs", systemImage: "magnifyingglass")
+            .frame(minWidth: 240, idealWidth: 280, maxWidth: 360)
+
+            Group {
+                if let item = store.selectedHistory ?? filtered.first {
+                    HistoryDetail(store: store, item: item)
+                } else {
+                    ContentUnavailableView("No matching runs", systemImage: "magnifyingglass")
+                }
             }
+            .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear { if store.selectedHistoryID == nil { store.selectedHistoryID = store.history.first?.id } }
         .onChange(of: store.selectedHistoryID) { _, _ in store.loadVerdictForSelectedHistory() }

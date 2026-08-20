@@ -46,9 +46,13 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_HELPERS="$APP_CONTENTS/Helpers"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 PROCESS_LAUNCHER="$APP_HELPERS/JBenchProcessLauncher"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+ICON_SOURCE="$ROOT_DIR/mockups/dock-icons/jbench-ip-as-logo-B1.png"
+ICONSET_DIR="$DIST_DIR/$APP_NAME.iconset"
+APP_ICON="$APP_RESOURCES/$APP_NAME.icns"
 
 swift build --configuration "$CONFIGURATION"
 BUILD_DIR="$(swift build --configuration "$CONFIGURATION" --show-bin-path)"
@@ -59,14 +63,42 @@ if [[ "$APP_BUNDLE" != "$ROOT_DIR/dist/$APP_NAME.app" ]]; then
   echo "refusing unexpected app bundle path: $APP_BUNDLE" >&2
   exit 1
 fi
+if [[ ! -f "$ICON_SOURCE" ]]; then
+  echo "missing app icon source: $ICON_SOURCE" >&2
+  exit 1
+fi
 if [[ -e "$APP_BUNDLE" ]]; then
   rm -r "$APP_BUNDLE"
 fi
+if [[ -e "$ICONSET_DIR" ]]; then
+  rm -r "$ICONSET_DIR"
+fi
 
-mkdir -p "$APP_MACOS" "$APP_HELPERS"
+mkdir -p "$APP_MACOS" "$APP_HELPERS" "$APP_RESOURCES" "$ICONSET_DIR"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp "$BUILD_PROCESS_LAUNCHER" "$PROCESS_LAUNCHER"
 chmod +x "$APP_BINARY" "$PROCESS_LAUNCHER"
+
+write_icon() {
+  local point_size="$1"
+  local pixel_size="$2"
+  local suffix="$3"
+  /usr/bin/sips -z "$pixel_size" "$pixel_size" "$ICON_SOURCE" \
+    --out "$ICONSET_DIR/icon_${point_size}x${point_size}${suffix}.png" >/dev/null
+}
+
+write_icon 16 16 ""
+write_icon 16 32 "@2x"
+write_icon 32 32 ""
+write_icon 32 64 "@2x"
+write_icon 128 128 ""
+write_icon 128 256 "@2x"
+write_icon 256 256 ""
+write_icon 256 512 "@2x"
+write_icon 512 512 ""
+write_icon 512 1024 "@2x"
+/usr/bin/iconutil -c icns "$ICONSET_DIR" -o "$APP_ICON"
+rm -r "$ICONSET_DIR"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,6 +109,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleName</key><string>$APP_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>$APP_NAME.icns</string>
   <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>

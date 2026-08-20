@@ -477,7 +477,7 @@ enum CodexWireRequest {
             "cwd": request.directoryPath,
             "model": request.configuration.model,
             "approvalPolicy": approvalPolicy(for: request.configuration.approvalPolicy),
-            "sandbox": sandbox(for: request.executionMode)
+            "sandbox": threadSandbox(for: request.executionMode)
         ]
     }
 
@@ -488,13 +488,14 @@ enum CodexWireRequest {
             "model": request.configuration.model,
             "cwd": request.directoryPath,
             "approvalPolicy": approvalPolicy(for: request.configuration.approvalPolicy),
-            "sandboxPolicy": ["type": sandbox(for: request.executionMode)]
+            "sandboxPolicy": ["type": turnSandboxPolicyType(for: request.executionMode)]
         ]
         if let effort = request.configuration.reasoning { params["effort"] = effort }
         return params
     }
 
-    private static func sandbox(for mode: ExecutionMode) -> String { mode == .readOnly ? "read-only" : "workspace-write" }
+    private static func threadSandbox(for mode: ExecutionMode) -> String { mode == .readOnly ? "read-only" : "workspace-write" }
+    private static func turnSandboxPolicyType(for mode: ExecutionMode) -> String { mode == .readOnly ? "readOnly" : "workspaceWrite" }
     static func approvalPolicy(for policy: ApprovalPolicy) -> String {
         switch policy {
         case .askEveryTime, .allowForAttempt: "on-request"

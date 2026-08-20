@@ -18,7 +18,7 @@ struct CodexAdapterTests {
         #expect(params["model"] as? String == "gpt-5.6-sol")
         #expect(params["effort"] as? String == "high")
         #expect(params["cwd"] as? String == "/Users/josh/work/project")
-        #expect(params["sandboxPolicy"] as? [String: String] == ["type": "read-only"])
+        #expect(params["sandboxPolicy"] as? [String: String] == ["type": "readOnly"])
         let input = try #require(params["input"] as? [[String: String]])
         #expect(input == [["type": "text", "text": "Return the exact heading only."]])
 
@@ -43,7 +43,7 @@ struct CodexAdapterTests {
         )
 
         #expect(CodexWireRequest.threadStartParams(for: request)["sandbox"] as? String == "workspace-write")
-        #expect(CodexWireRequest.turnStartParams(for: request, threadID: "thread-1")["sandboxPolicy"] as? [String: String] == ["type": "workspace-write"])
+        #expect(CodexWireRequest.turnStartParams(for: request, threadID: "thread-1")["sandboxPolicy"] as? [String: String] == ["type": "workspaceWrite"])
     }
 
     @Test func fixtureNotificationsStreamRawOutputSettingsAndUsage() throws {

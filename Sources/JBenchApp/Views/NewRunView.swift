@@ -15,7 +15,6 @@ struct NewRunView: View {
                     CompletedRunHeader(store: store) { showsSetup = true }
                 }
                 LanesWorkspace(store: store, lanes: store.lanes)
-                SummaryStrip(lanes: store.lanes)
             }
             .padding(20)
         }

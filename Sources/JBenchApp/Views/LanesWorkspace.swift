@@ -355,34 +355,6 @@ private struct BlindReviewView: View {
     }
 }
 
-struct SummaryStrip: View {
-    let lanes: [LanePresentation]
-    var body: some View {
-        HStack(spacing: 0) {
-            SummaryItem(icon: "person.2.fill", title: "Manual comparison", value: "JBench never selects a winner", tint: .blue)
-            Divider().frame(height: 56)
-            SummaryItem(icon: "eye.fill", title: "Observed telemetry", value: "Unavailable stays unavailable", tint: .green)
-            Divider().frame(height: 56)
-            SummaryItem(icon: "checkmark.seal.fill", title: "Verdict", value: "Use Blind Review to decide", tint: .orange)
-        }
-        .padding(.vertical, 10)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary) }
-    }
-}
-
-private struct SummaryItem: View {
-    let icon: String; let title: String; let value: String; let tint: Color
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon).foregroundStyle(tint).font(.title3).frame(width: 34, height: 34).background(tint.opacity(0.1), in: Circle())
-            VStack(alignment: .leading, spacing: 2) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.subheadline).lineLimit(1) }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 16)
-    }
-}
-
 private struct MetricItem: View {
     let icon: String; let value: String; let label: String; var color: Color = .secondary
     var body: some View {

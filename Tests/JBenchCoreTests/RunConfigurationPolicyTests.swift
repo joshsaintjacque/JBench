@@ -2,6 +2,22 @@ import Foundation
 import Testing
 @testable import JBenchCore
 
+@Test func runConfigurationPolicyRejectsInteractiveAgyApprovalOnlyForEditableRuns() {
+    let policy = RunConfigurationPolicy()
+    let agy = AgentConfiguration(harness: .agy, model: "gemini-3.7-flash", approvalPolicy: .askEveryTime)
+
+    #expect(policy.validationError(for: [agy], executionMode: .editable) == RunConfigurationPolicy.agyInteractiveApprovalMessage)
+    #expect(policy.validationError(for: [agy], executionMode: .readOnly) == nil)
+    #expect(policy.validationError(for: [
+        agy,
+        AgentConfiguration(harness: .agy, model: "gemini-3.7-pro", approvalPolicy: .allowForAttempt)
+    ], executionMode: .editable) == RunConfigurationPolicy.agyInteractiveApprovalMessage)
+    #expect(policy.validationError(for: [
+        AgentConfiguration(harness: .agy, model: "gemini-3.7-flash", approvalPolicy: .allowForAttempt),
+        AgentConfiguration(harness: .agy, model: "gemini-3.7-pro", approvalPolicy: .denyAll)
+    ], executionMode: .editable) == nil)
+}
+
 @Test func runConfigurationPolicyValidatesPromptLaneCountAndAvailability() {
     let policy = RunConfigurationPolicy()
     let settings = DiscoverySettings(cachedCatalog: [

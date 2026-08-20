@@ -100,7 +100,7 @@ public actor AgyAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
             case .denyAll:
                 arguments.append("--sandbox")
             case .askEveryTime:
-                continuation.finish(throwing: JBenchCoreError.storage("Antigravity CLI does not support interactive approval prompts in batch execution. Select 'Allow for attempt' or 'Deny all'."))
+                continuation.finish(throwing: JBenchCoreError.storage(RunConfigurationPolicy.agyInteractiveApprovalMessage))
                 return
             }
         }

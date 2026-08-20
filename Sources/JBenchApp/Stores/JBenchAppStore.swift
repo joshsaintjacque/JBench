@@ -41,7 +41,11 @@ final class JBenchAppStore: JBenchRunService {
     var reviewNote = ""
     var history: [HistoryPresentation] = []
     var selectedHistoryID: UUID? {
-        didSet { resetVerdictSelectionForCurrentTarget() }
+        didSet {
+            if section == .history {
+                resetVerdictSelectionForCurrentTarget()
+            }
+        }
     }
     var presets: [Preset] = []
     var timeoutMinutes = 30 { didSet { updateTimeouts() } }
@@ -424,7 +428,7 @@ final class JBenchAppStore: JBenchRunService {
         guard let targetID else { statusMessage = "No run is selected for this verdict."; return }
         Task {
             do {
-                guard let run = try await coordinator?.run(id: targetID) else { statusMessage = "Could not load the selected run."; return }
+                guard let run = try await coordinator?.run(id: targetID) ?? historyRuns[targetID] else { statusMessage = "Could not load the selected run."; return }
                 guard verdictTargetID == targetID else { return }
                 guard run.agents.contains(where: { $0.id == selectedWinnerID }) else {
                     self.winningLaneID = nil
@@ -435,6 +439,7 @@ final class JBenchAppStore: JBenchRunService {
                 try await historyStore?.saveVerdict(verdict)
                 verdicts[run.id] = verdict
                 isRevealOn = true
+                await loadHistory()
                 statusMessage = "Manual verdict saved"
             } catch { statusMessage = actionable(error) }
         }
@@ -457,9 +462,32 @@ final class JBenchAppStore: JBenchRunService {
                 verdicts[targetID] = verdict
                 winningLaneID = nil
                 isRevealOn = true
+                await loadHistory()
                 statusMessage = "Verdict skipped. Identities revealed."
             } catch { statusMessage = actionable(error) }
         }
+    }
+
+    func viewActiveRunInHistory() {
+        if let activeRunID {
+            selectedHistoryID = activeRunID
+            loadVerdictForSelectedHistory()
+        }
+        section = .history
+    }
+
+    func startNewRun() {
+        guard !isBackgroundRunActive else {
+            statusMessage = "Wait for the active run to finish before starting a new run."
+            return
+        }
+        activeRunID = nil
+        activeRun = nil
+        lanes = []
+        isRevealOn = false
+        winningLaneID = nil
+        reviewNote = ""
+        section = .newRun
     }
 
     func loadVerdictForSelectedHistory() {
@@ -870,13 +898,18 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     private func loadPersistedState() async {
-        await loadHistory()
+        guard let persistedRuns = try? await historyStore?.search() else { return }
+        let runs = await reconcilePersistedNonterminalAttempts(in: persistedRuns)
+        await populateHistory(from: runs)
         if let stored = try? await historyStore?.presets() { presets = stored }
     }
 
     private func loadHistory() async {
         guard let persistedRuns = try? await historyStore?.search() else { return }
-        let runs = await reconcilePersistedNonterminalAttempts(in: persistedRuns)
+        await populateHistory(from: persistedRuns)
+    }
+
+    private func populateHistory(from runs: [BenchmarkRun]) async {
         historyRuns = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, $0) })
         for run in runs {
             if let verdict = try? await historyStore?.verdict(for: run.id) { verdicts[run.id] = verdict }
@@ -895,7 +928,9 @@ final class JBenchAppStore: JBenchRunService {
         }
         history = runs.map { run in HistoryPresentation(id: run.id, title: run.title, date: run.createdAt, state: run.state, directory: run.directoryPath, mode: run.executionMode, lanes: presentation(for: run), prompt: run.prompt) }
         if selectedHistoryID == nil { selectedHistoryID = history.first?.id }
-        loadVerdictForSelectedHistory()
+        if section == .history {
+            loadVerdictForSelectedHistory()
+        }
     }
 
     private func historyRun(id: UUID?) -> BenchmarkRun? {
@@ -913,7 +948,20 @@ final class JBenchAppStore: JBenchRunService {
         winningLaneID = nil
         reviewNote = ""
         isRevealOn = false
-        if section == .history, selectedHistoryID != nil { loadVerdictForSelectedHistory() }
+        if section == .history, selectedHistoryID != nil {
+            loadVerdictForSelectedHistory()
+        } else if section == .newRun, activeRunID != nil {
+            loadVerdictForActiveRun()
+        }
+    }
+
+    func loadVerdictForActiveRun() {
+        guard let id = activeRunID, let verdict = verdicts[id] else { return }
+        winningLaneID = verdict.winningAgentRunID.flatMap { laneID in
+            activeRun?.agents.contains(where: { $0.id == laneID }) == true ? laneID : nil
+        }
+        reviewNote = verdict.note ?? ""
+        isRevealOn = true
     }
 
     private func runContainingLane(_ laneID: UUID) -> BenchmarkRun? {
@@ -980,6 +1028,10 @@ final class JBenchAppStore: JBenchRunService {
     private func reconcilePersistedNonterminalAttempts(in persistedRuns: [BenchmarkRun]) async -> [BenchmarkRun] {
         var reconciledRuns: [BenchmarkRun] = []
         for var run in persistedRuns {
+            if run.id == activeRunID {
+                reconciledRuns.append(run)
+                continue
+            }
             var changed = false
             let now = Date.now
             for agentIndex in run.agents.indices {

@@ -227,6 +227,9 @@ public actor OpenCodeAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
             let raw = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
             guard !raw.isEmpty, raw != "[DONE]" else { continue }
             let parsed = OpenCodeWireParser.parseEvent(raw)
+            if let eventSessionID = parsed.sessionID, !eventSessionID.isEmpty, eventSessionID != sessionID {
+                continue
+            }
             await handle(parsed: parsed, rawJSON: raw, request: request, continuation: continuation)
             if parsed.isTerminal { return }
         }

@@ -20,25 +20,26 @@ enum OpenCodeWireParser {
         guard let type = string(in: root, paths: [["type"], ["event"]]) else {
             return .init(kind: .activity, text: "Unparseable OpenCode event.")
         }
+        let eventSessionID = string(in: root, paths: [["properties", "sessionID"], ["properties", "sessionId"], ["properties", "session", "id"], ["sessionID"], ["sessionId"], ["session_id"]])
         let loweredType = type.lowercased()
         if loweredType.contains("session.error") || loweredType.hasSuffix(".error") {
-            return .init(kind: .failed, text: string(in: root, paths: [["properties", "error", "message"], ["properties", "message"], ["error", "message"], ["message"]]))
+            return .init(kind: .failed, sessionID: eventSessionID, text: string(in: root, paths: [["properties", "error", "message"], ["properties", "message"], ["error", "message"], ["message"]]))
         }
-        if loweredType.contains("session.status"), string(in: root, paths: [["properties", "status"], ["status"]])?.lowercased() == "idle" {
-            return .init(kind: .completed)
+        if loweredType == "session.idle" || (loweredType.contains("session.status") && string(in: root, paths: [["properties", "status", "type"], ["status", "type"], ["properties", "status"], ["status"]])?.lowercased() == "idle") {
+            return .init(kind: .completed, sessionID: eventSessionID)
         }
         if loweredType.contains("permission") {
             let permissionID = string(in: root, paths: [["properties", "id"], ["properties", "permission", "id"], ["permission", "id"], ["id"]])
             let category = string(in: root, paths: [["properties", "permission", "type"], ["properties", "type"], ["properties", "permission"], ["permission", "type"]])
             let summary = string(in: root, paths: [["properties", "permission", "description"], ["properties", "description"], ["properties", "title"]])
             let targetPath = string(in: root, paths: [["properties", "permission", "path"], ["properties", "path"], ["properties", "permission", "file"]])
-            return .init(kind: .permission, permissionID: permissionID, permissionCategory: category, permissionSummary: summary, targetPath: targetPath)
+            return .init(kind: .permission, sessionID: eventSessionID, permissionID: permissionID, permissionCategory: category, permissionSummary: summary, targetPath: targetPath)
         }
         if loweredType.contains("message.part.updated") {
             let partType = string(in: root, paths: [["properties", "part", "type"], ["part", "type"]])?.lowercased()
             if partType == "text" {
                 let delta = string(in: root, paths: [["properties", "delta"], ["properties", "part", "text"], ["properties", "part", "delta"], ["delta"]])
-                return .init(kind: .textDelta, text: delta)
+                return .init(kind: .textDelta, sessionID: eventSessionID, text: delta)
             }
         }
         if loweredType.contains("message.updated") {
@@ -47,10 +48,10 @@ enum OpenCodeWireParser {
             let observedModel = [provider, model].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "/")
             let observed = ObservedSettings(model: observedModel.isEmpty ? .unavailable : .init(observedModel, provenance: .harnessReported))
             let metrics = metrics(in: root)
-            if !observedModel.isEmpty { return .init(kind: .observed, observed: observed, metrics: metrics) }
-            if metrics != nil { return .init(kind: .metrics, metrics: metrics) }
+            if !observedModel.isEmpty { return .init(kind: .observed, sessionID: eventSessionID, observed: observed, metrics: metrics) }
+            if metrics != nil { return .init(kind: .metrics, sessionID: eventSessionID, metrics: metrics) }
         }
-        return .init(kind: .activity, text: type)
+        return .init(kind: .activity, sessionID: eventSessionID, text: type)
     }
 
     static func catalogEntries(from rawJSON: String, source: String = "OpenCode GET /provider") -> [ModelCatalogEntry] {
@@ -174,6 +175,7 @@ enum OpenCodeWireParser {
 struct OpenCodeParsedEvent: Sendable {
     enum Kind: Sendable, Equatable { case textDelta, activity, observed, metrics, permission, completed, failed }
     var kind: Kind
+    var sessionID: String? = nil
     var text: String? = nil
     var observed: ObservedSettings? = nil
     var metrics: AttemptMetrics? = nil

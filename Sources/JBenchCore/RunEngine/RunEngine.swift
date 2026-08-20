@@ -250,6 +250,9 @@ public actor RunCoordinator {
     public func start(_ draft: RunDraft) async throws -> BenchmarkRun {
         guard !shuttingDown else { throw JBenchCoreError.storage("JBench is shutting down and cannot start a run.") }
         try Preset.validate(draft.configurations)
+        if let validationError = RunConfigurationPolicy().validationError(for: draft.configurations, executionMode: draft.executionMode) {
+            throw JBenchCoreError.storage(validationError)
+        }
         try await preparation.validate(draft: draft)
         guard draft.executionMode != .editable || draft.repositoryState == .cleanGit else {
             throw JBenchCoreError.storage("Editable runs require a clean Git repository.")
@@ -353,6 +356,9 @@ public actor RunCoordinator {
             throw JBenchCoreError.storage("Only failed or timed-out attempts can be retried.")
         }
         let agent = run.agents[location.agentIndex]
+        if let validationError = RunConfigurationPolicy().validationError(for: [agent.requested], executionMode: run.executionMode) {
+            throw JBenchCoreError.storage(validationError)
+        }
         let attempt = AgentAttempt(agentRunID: agent.id, number: agent.attempts.count + 1, requested: agent.requested)
         let capability: ReadOnlyCapability?
         if run.executionMode == .readOnly {

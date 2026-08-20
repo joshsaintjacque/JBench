@@ -3,6 +3,34 @@ import Testing
 @testable import JBenchCore
 
 struct RunLifecycleTests {
+    @Test func editableAgyAskIsRejectedBeforePreparingOrPersistingRun() async throws {
+        let fixture = try Fixture()
+        let preparation = RecordingPreparation()
+        let coordinator = RunCoordinator(
+            adapters: [AgyAdapter(executablePath: "/usr/bin/true")],
+            history: fixture.history,
+            evidence: fixture.evidence,
+            preparation: preparation
+        )
+        let configurations = [
+            AgentConfiguration(harness: .agy, model: "gemini-3.7-flash", approvalPolicy: .askEveryTime),
+            AgentConfiguration(harness: .agy, model: "gemini-3.7-pro", approvalPolicy: .allowForAttempt)
+        ]
+
+        do {
+            _ = try await coordinator.start(fixture.draft(configurations: configurations, mode: .editable))
+            Issue.record("An editable Agy run with interactive approval should be rejected.")
+        } catch let error as JBenchCoreError {
+            #expect(error == .storage(RunConfigurationPolicy.agyInteractiveApprovalMessage))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+
+        #expect(await preparation.requests.isEmpty)
+        let runs = try await coordinator.runs()
+        #expect(runs.isEmpty)
+    }
+
     @Test func initialPreparationFailureStartsNoHarnessAndAbandonsCreatedWorktree() async throws {
         let fixture = try Fixture()
         let adapter = CountingAdapter()

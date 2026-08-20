@@ -9,7 +9,7 @@ struct LanesWorkspace: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(spacing: 12) {
                 Picker("Review mode", selection: $store.reviewMode) {
                     ForEach(RunPresentation.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
@@ -17,7 +17,10 @@ struct LanesWorkspace: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 250)
+                .frame(width: 220)
+
+                overallStatusView
+
                 Spacer()
                 Menu("Export", systemImage: "square.and.arrow.up") {
                     Button("Markdown report") { store.exportMarkdown(runID: runID) }
@@ -64,6 +67,133 @@ struct LanesWorkspace: View {
             .frame(minWidth: 760, minHeight: 520)
         }
     }
+
+    @ViewBuilder
+    private var overallStatusView: some View {
+        if !lanes.isEmpty {
+            let runningCount = lanes.filter { $0.state == .running || $0.state == .starting }.count
+            let approvalCount = lanes.filter { $0.state == .waitingForApproval }.count
+            let queuedCount = lanes.filter { $0.state == .queued }.count
+            let completedCount = lanes.filter { $0.state == .completed }.count
+            let failedCount = lanes.filter { $0.state == .failed || $0.state == .timedOut }.count
+            let cancelledCount = lanes.filter { $0.state == .cancelled }.count
+            let interruptedCount = lanes.filter { $0.state == .interrupted }.count
+            let stoppedCount = cancelledCount + interruptedCount
+
+            if approvalCount > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text(approvalCount == 1 ? "Approval needed for 1 agent" : "Approval needed for \(approvalCount) agents")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.orange.opacity(0.25), lineWidth: 0.5) }
+            } else if runningCount > 0 {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("Running \(runningCount) of \(lanes.count) agents…")
+                        .font(.caption.bold())
+                        .foregroundStyle(.blue)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.blue.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.blue.opacity(0.25), lineWidth: 0.5) }
+            } else if queuedCount > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Queued \(queuedCount) of \(lanes.count) agents…")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5) }
+            } else if completedCount == lanes.count {
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                    Text("All \(lanes.count) agents finished")
+                        .font(.caption.bold())
+                        .foregroundStyle(.green)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.green.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.green.opacity(0.25), lineWidth: 0.5) }
+            } else if failedCount == lanes.count {
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    Text("All agents failed")
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5) }
+            } else if stoppedCount == lanes.count {
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(interruptedCount > 0 ? "Run interrupted" : "All agents cancelled")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5) }
+            } else if completedCount > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    let summaryText: String = {
+                        if failedCount > 0 && stoppedCount > 0 {
+                            return "\(completedCount) done, \(failedCount) failed, \(stoppedCount) stopped"
+                        } else if failedCount > 0 {
+                            return "\(completedCount) done, \(failedCount) failed"
+                        } else {
+                            return "\(completedCount) done, \(stoppedCount) stopped"
+                        }
+                    }()
+                    Text(summaryText)
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.orange.opacity(0.25), lineWidth: 0.5) }
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                    Text("\(failedCount) failed, \(stoppedCount) stopped")
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5) }
+            }
+        }
+    }
 }
 
 private struct LaneCard: View {
@@ -87,9 +217,12 @@ private struct LaneCard: View {
                     .frame(width: 34, height: 34)
                     .background(tint.opacity(0.12), in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(laneNumber). \(harnessName) · \(lane.configuration.model) · \(lane.configuration.reasoning ?? "Default")")
-                        .font(.headline)
-                        .lineLimit(2)
+                    HStack(spacing: 6) {
+                        Text("\(laneNumber). \(harnessName) · \(lane.configuration.model) · \(lane.configuration.reasoning ?? "Default")")
+                            .font(.headline)
+                            .lineLimit(2)
+                        LaneStatusBadge(state: lane.state)
+                    }
                     Label(lane.activity, systemImage: stateIcon)
                         .font(.caption)
                         .foregroundStyle(stateColor)
@@ -294,9 +427,10 @@ private struct BlindReviewView: View {
             }
             ForEach(lanes.sorted { $0.blindReviewOrder < $1.blindReviewOrder }) { lane in
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(spacing: 8) {
                         Text(candidateTitle(for: lane))
                             .font(.headline)
+                        LaneStatusBadge(state: lane.state)
                         Spacer()
                         if store.winningLaneID == lane.id {
                             Button("Selected winner") { store.winningLaneID = lane.id }
@@ -306,23 +440,54 @@ private struct BlindReviewView: View {
                                 .buttonStyle(.bordered)
                         }
                     }
-                    Text(lane.output)
-                        .lineLimit(expandedResponses.contains(lane.id) ? nil : 4)
-                        .textSelection(.enabled)
-                    Button {
-                        if expandedResponses.contains(lane.id) {
-                            expandedResponses.remove(lane.id)
+
+                    if lane.state == .running || lane.state == .starting {
+                        if lane.output.isEmpty {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Waiting for streamed output…")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 4)
                         } else {
-                            expandedResponses.insert(lane.id)
+                            Text(lane.output)
+                                .lineLimit(expandedResponses.contains(lane.id) ? nil : 4)
+                                .textSelection(.enabled)
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.mini)
+                                Text("Generating response…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                    } label: {
-                        Label(
-                            expandedResponses.contains(lane.id) ? "Show less" : "Show full response",
-                            systemImage: expandedResponses.contains(lane.id) ? "chevron.up" : "chevron.down"
-                        )
+                    } else if lane.output.isEmpty {
+                        Text("No response recorded.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    } else {
+                        Text(lane.output)
+                            .lineLimit(expandedResponses.contains(lane.id) ? nil : 4)
+                            .textSelection(.enabled)
                     }
-                    .buttonStyle(.link)
-                    .controlSize(.small)
+
+                    if !lane.output.isEmpty {
+                        Button {
+                            if expandedResponses.contains(lane.id) {
+                                expandedResponses.remove(lane.id)
+                            } else {
+                                expandedResponses.insert(lane.id)
+                            }
+                        } label: {
+                            Label(
+                                expandedResponses.contains(lane.id) ? "Show less" : "Show full response",
+                                systemImage: expandedResponses.contains(lane.id) ? "chevron.up" : "chevron.down"
+                            )
+                        }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                    }
                 }
                 .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 10)).overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary) }
             }
@@ -364,3 +529,82 @@ private struct MetricItem: View {
         }
     }
 }
+
+struct LaneStatusBadge: View {
+    let state: AgentRunState
+
+    var body: some View {
+        HStack(spacing: 4) {
+            switch state {
+            case .running, .starting:
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Running")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.blue)
+            case .queued:
+                Image(systemName: "clock")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("Queued")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            case .waitingForApproval:
+                Image(systemName: "hand.raised.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                Text("Approval needed")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.orange)
+            case .completed:
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                Text("Done")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.green)
+            case .failed, .timedOut:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                Text(state == .timedOut ? "Timed Out" : "Failed")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.red)
+            case .cancelled, .interrupted:
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(state == .interrupted ? "Interrupted" : "Cancelled")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(backgroundColor, in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(borderColor, lineWidth: 0.5)
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch state {
+        case .running, .starting: Color.blue.opacity(0.1)
+        case .completed: Color.green.opacity(0.1)
+        case .waitingForApproval: Color.orange.opacity(0.12)
+        case .failed, .timedOut: Color.red.opacity(0.1)
+        case .cancelled, .interrupted, .queued: Color.secondary.opacity(0.1)
+        }
+    }
+
+    private var borderColor: Color {
+        switch state {
+        case .running, .starting: Color.blue.opacity(0.3)
+        case .completed: Color.green.opacity(0.3)
+        case .waitingForApproval: Color.orange.opacity(0.3)
+        case .failed, .timedOut: Color.red.opacity(0.3)
+        case .cancelled, .interrupted, .queued: Color.secondary.opacity(0.2)
+        }
+    }
+}
+

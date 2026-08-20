@@ -9,8 +9,19 @@ public struct RunConfigurationPolicy: Sendable {
     public static let minimumLaneCount = 2
     public static let maximumLaneCount = 6
     public static let unselectedModel = "Not selected"
+    static let agyInteractiveApprovalMessage = "Antigravity editable lanes cannot use Ask for every approval in batch mode. Select Allow for attempt or Deny all."
 
     public init() {}
+
+    /// Returns a user-facing error for combinations that a harness cannot run
+    /// safely in the selected execution mode.
+    public func validationError(for configurations: [AgentConfiguration], executionMode: ExecutionMode) -> String? {
+        guard executionMode == .editable,
+              configurations.contains(where: { $0.harness == .agy && $0.approvalPolicy == .askEveryTime }) else {
+            return nil
+        }
+        return Self.agyInteractiveApprovalMessage
+    }
 
     public func canRun(
         prompt: String,

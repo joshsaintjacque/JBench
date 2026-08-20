@@ -50,6 +50,7 @@ public actor SQLiteHistoryStore {
         guard sqlite3_open_v2(databaseURL.path, &pointer, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let pointer else {
             throw JBenchCoreError.storage("Could not open the local history database.")
         }
+        sqlite3_busy_timeout(pointer, 5000)
         database = pointer
         encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .custom { date, encoder in
@@ -71,7 +72,9 @@ public actor SQLiteHistoryStore {
             if let date = Self.date(from: value) { return date }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid persisted date: \(value)")
         }
+        try Self.execute(database, "PRAGMA journal_mode = WAL")
         try Self.execute(database, "PRAGMA foreign_keys = ON")
+        try Self.execute(database, "PRAGMA busy_timeout = 5000")
         try Self.migrate(database)
     }
 

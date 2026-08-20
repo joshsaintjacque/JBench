@@ -494,7 +494,7 @@ enum CodexWireRequest {
         return params
     }
 
-    private static func sandbox(for mode: ExecutionMode) -> String { mode == .readOnly ? "readOnly" : "workspaceWrite" }
+    private static func sandbox(for mode: ExecutionMode) -> String { mode == .readOnly ? "read-only" : "workspace-write" }
     static func approvalPolicy(for policy: ApprovalPolicy) -> String {
         switch policy {
         case .askEveryTime, .allowForAttempt: "on-request"

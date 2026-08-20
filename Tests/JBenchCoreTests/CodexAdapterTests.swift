@@ -18,18 +18,32 @@ struct CodexAdapterTests {
         #expect(params["model"] as? String == "gpt-5.6-sol")
         #expect(params["effort"] as? String == "high")
         #expect(params["cwd"] as? String == "/Users/josh/work/project")
-        #expect(params["sandboxPolicy"] as? [String: String] == ["type": "readOnly"])
+        #expect(params["sandboxPolicy"] as? [String: String] == ["type": "read-only"])
         let input = try #require(params["input"] as? [[String: String]])
         #expect(input == [["type": "text", "text": "Return the exact heading only."]])
 
         let threadParams = CodexWireRequest.threadStartParams(for: request)
-        #expect(threadParams["sandbox"] as? String == "readOnly")
+        #expect(threadParams["sandbox"] as? String == "read-only")
         #expect(CodexWireRequest.approvalPolicy(for: .askEveryTime) == "on-request")
         #expect(CodexWireRequest.approvalPolicy(for: .allowForAttempt) == "on-request")
         #expect(CodexWireRequest.approvalPolicy(for: .denyAll) == "never")
         #expect(CodexWireRequest.automaticApprovalDecision(for: .askEveryTime) == nil)
         #expect(CodexWireRequest.automaticApprovalDecision(for: .allowForAttempt) == "acceptForSession")
         #expect(CodexWireRequest.automaticApprovalDecision(for: .denyAll) == nil)
+    }
+
+    @Test func editableRequestsUseCurrentCodexSandboxEnum() throws {
+        let request = HarnessRequest(
+            runID: UUID(),
+            attemptID: UUID(),
+            prompt: "Inspect the project.",
+            directoryPath: "/Users/josh/work/project",
+            executionMode: .editable,
+            configuration: AgentConfiguration(harness: .codex, model: "gpt-5.6-luna")
+        )
+
+        #expect(CodexWireRequest.threadStartParams(for: request)["sandbox"] as? String == "workspace-write")
+        #expect(CodexWireRequest.turnStartParams(for: request, threadID: "thread-1")["sandboxPolicy"] as? [String: String] == ["type": "workspace-write"])
     }
 
     @Test func fixtureNotificationsStreamRawOutputSettingsAndUsage() throws {

@@ -204,6 +204,7 @@ private struct LaneCard: View {
         switch lane.configuration.harness {
         case .codex: lane.configuration.model == "Luna" ? .purple : .blue
         case .openCode: .orange
+        case .agy: .teal
         case .fake: .gray
         }
     }
@@ -211,7 +212,7 @@ private struct LaneCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top) {
-                Image(systemName: lane.configuration.harness == .codex ? "sparkles" : "hexagon.fill")
+                Image(systemName: lane.configuration.harness == .codex ? "sparkles" : (lane.configuration.harness == .agy ? "atom" : "hexagon.fill"))
                     .font(.title2)
                     .foregroundStyle(tint)
                     .frame(width: 34, height: 34)
@@ -300,6 +301,7 @@ private struct LaneCard: View {
         switch lane.configuration.harness {
         case .codex: "Codex"
         case .openCode: "OpenCode"
+        case .agy: "Antigravity"
         case .fake: "Demo"
         }
     }
@@ -537,6 +539,7 @@ private struct BlindReviewView: View {
             switch lane.configuration.harness {
             case .codex: harness = "Codex"
             case .openCode: harness = "OpenCode"
+            case .agy: harness = "Antigravity"
             case .fake: harness = "Demo"
             }
             return "\(harness) · \(lane.configuration.model)"

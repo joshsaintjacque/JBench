@@ -33,6 +33,7 @@ public struct FuzzyModelPicker: View {
         switch harness {
         case .codex: "Codex"
         case .openCode: "OpenCode"
+        case .agy: "Antigravity"
         case .fake: "Demo"
         }
     }

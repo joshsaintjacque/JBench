@@ -59,6 +59,7 @@ final class JBenchAppStore: JBenchRunService {
     var discoverySettings: DiscoverySettings
     var customCodexModel = ""
     var customOpenCodeModel = ""
+    var customAgyModel = ""
     var repositorySnapshot: RepositorySnapshot
     var deletionPreview: HistoryDeletionPreview?
     var isShowingDeletionConfirmation = false
@@ -248,6 +249,7 @@ final class JBenchAppStore: JBenchRunService {
             let protocols: [HarnessKind: String] = [
                 .codex: "app-server JSON-RPC contract v1",
                 .openCode: "HTTP/SSE v1.18.18 envelope contract",
+                .agy: "CLI stream-json protocol v1.1",
                 .fake: "provider-free fixture contract v1"
             ]
             let draft = RunDraft(title: runTitle.nilIfEmpty, prompt: prompt, directoryPath: directory, repositoryState: snapshot.state, sourceCommit: sourceCommit, executionMode: mode, harnessVersions: versions, integrationProtocolVersions: protocols, configurations: configurations)
@@ -795,17 +797,34 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func addCustomModel(for harness: HarnessKind) {
-        let value = (harness == .codex ? customCodexModel : customOpenCodeModel).trimmingCharacters(in: .whitespacesAndNewlines)
+        let textValue: String = switch harness {
+        case .codex: customCodexModel
+        case .openCode: customOpenCodeModel
+        case .agy: customAgyModel
+        case .fake: ""
+        }
+        let value = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { statusMessage = "Enter the harness-native model ID first."; return }
         guard !catalog(for: harness).contains(where: { $0.nativeModelID == value }) else { statusMessage = "That model is already listed."; return }
         discoverySettings.customModels.append(.init(harness: harness, nativeModelID: value, discoverySource: "Owner custom fallback", availability: .customNotVerified))
         Self.saveDiscoverySettings(discoverySettings)
         let settings = discoverySettings
+        let harnessName: String = switch harness {
+        case .codex: "Codex"
+        case .openCode: "OpenCode"
+        case .agy: "Antigravity"
+        case .fake: "Demo"
+        }
         Task {
             try? await discovery.updateSettings(settings)
-            statusMessage = "Added custom \(harness == .codex ? "Codex" : "OpenCode") model. It remains unverified until a run observes it."
+            statusMessage = "Added custom \(harnessName) model. It remains unverified until a run observes it."
         }
-        if harness == .codex { customCodexModel = "" } else { customOpenCodeModel = "" }
+        switch harness {
+        case .codex: customCodexModel = ""
+        case .openCode: customOpenCodeModel = ""
+        case .agy: customAgyModel = ""
+        case .fake: break
+        }
     }
 
     func setNotificationsEnabled(_ enabled: Bool) {
@@ -841,6 +860,9 @@ final class JBenchAppStore: JBenchRunService {
         if let openCode = resolver.resolve(harness: .openCode, override: discoverySettings.executableOverrides[.openCode]) {
             // This remains false until a future version-specific restriction + sentinel diagnostic is implemented.
             adapters.append(OpenCodeAdapter(executablePath: openCode.url.path, supportsVerifiedReadOnly: false))
+        }
+        if let agy = resolver.resolve(harness: .agy, override: discoverySettings.executableOverrides[.agy]) {
+            adapters.append(AgyAdapter(executablePath: agy.url.path))
         }
         coordinator = RunCoordinator(adapters: adapters, history: historyStore, evidence: evidenceStore, preparation: preparation ?? PassthroughAttemptPreparationService())
         subscribeToUpdates()
@@ -1232,7 +1254,8 @@ final class JBenchAppStore: JBenchRunService {
     private static func makeDiscovery(settings: DiscoverySettings, cacheURL: URL) -> DiscoveryService {
         let codex = CodexAppServerAdapter()
         let openCode = OpenCodeAdapter()
-        return DiscoveryService(settings: settings, adapters: [.codex: codex, .openCode: openCode], cacheURL: cacheURL)
+        let agy = AgyAdapter()
+        return DiscoveryService(settings: settings, adapters: [.codex: codex, .openCode: openCode, .agy: agy], cacheURL: cacheURL)
     }
     private static func loadDiscoverySettings() -> DiscoverySettings {
         guard let data = UserDefaults.standard.data(forKey: "JBench.discoverySettings"), let settings = try? JSONDecoder().decode(DiscoverySettings.self, from: data) else { return .init() }

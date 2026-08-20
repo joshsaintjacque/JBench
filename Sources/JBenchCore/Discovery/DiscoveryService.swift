@@ -70,14 +70,21 @@ public struct ExecutableResolver: Sendable {
         return nil
     }
 
-    private func commandName(for harness: HarnessKind) -> String { harness == .codex ? "codex" : "opencode" }
+    private func commandName(for harness: HarnessKind) -> String {
+        switch harness {
+        case .codex: "codex"
+        case .openCode: "opencode"
+        case .agy: "agy"
+        case .fake: "demo"
+        }
+    }
     private func knownLocations(for harness: HarnessKind) -> [String] {
         let command = commandName(for: harness)
         let home = NSHomeDirectory()
         return [
             "/opt/homebrew/bin/\(command)", "/usr/local/bin/\(command)", "/usr/bin/\(command)",
             "\(home)/.local/bin/\(command)", "\(home)/.opencode/bin/\(command)",
-            "\(home)/.codex/bin/\(command)"
+            "\(home)/.codex/bin/\(command)", "\(home)/.gemini/bin/\(command)"
         ]
     }
 }
@@ -100,7 +107,7 @@ public actor DiscoveryService {
         try persistCache()
     }
 
-    public func discover(_ harnesses: [HarnessKind] = [.codex, .openCode]) async -> [HarnessInstallation] {
+    public func discover(_ harnesses: [HarnessKind] = [.codex, .openCode, .agy]) async -> [HarnessInstallation] {
         await withTaskGroup(of: HarnessInstallation?.self, returning: [HarnessInstallation].self) { group in
             for harness in harnesses where harness != .fake {
                 group.addTask { await self.discoverOne(harness) }

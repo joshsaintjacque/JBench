@@ -50,6 +50,7 @@ struct HistoryView: View {
                             Text("Any harness").tag(HarnessKind?.none)
                             Text("Codex").tag(HarnessKind?.some(.codex))
                             Text("OpenCode").tag(HarnessKind?.some(.openCode))
+                            Text("Antigravity (agy)").tag(HarnessKind?.some(.agy))
                         }
                         Toggle("Has verdict", isOn: $verdictOnly)
                         Toggle("Date range", isOn: $useDateRange)
@@ -235,11 +236,34 @@ struct SettingsDetailView: View {
             Section("Harness diagnostics") {
                 ForEach(store.diagnostics) { diagnostic in
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack { Image(systemName: diagnostic.harness == .codex ? "sparkles" : "hexagon.fill").foregroundStyle(.tint); Text(diagnostic.harness == .codex ? "Codex" : "OpenCode").font(.headline); Spacer(); Label(diagnostic.status == .ready ? "Ready" : "Unavailable", systemImage: diagnostic.status == .ready ? "checkmark.circle.fill" : "xmark.circle.fill").foregroundStyle(diagnostic.status == .ready ? .green : .red) }
+                        let harnessIcon: String = switch diagnostic.harness {
+                        case .codex: "sparkles"
+                        case .openCode: "hexagon.fill"
+                        case .agy: "arrow.triangle.2.circlepath"
+                        case .fake: "theatermasks.fill"
+                        }
+                        let harnessTitle: String = switch diagnostic.harness {
+                        case .codex: "Codex"
+                        case .openCode: "OpenCode"
+                        case .agy: "Antigravity"
+                        case .fake: "Demo"
+                        }
+                        HStack {
+                            Image(systemName: harnessIcon).foregroundStyle(.tint)
+                            Text(harnessTitle).font(.headline)
+                            Spacer()
+                            Label(diagnostic.status == .ready ? "Ready" : "Unavailable", systemImage: diagnostic.status == .ready ? "checkmark.circle.fill" : "xmark.circle.fill").foregroundStyle(diagnostic.status == .ready ? .green : .red)
+                        }
                         Text("\(diagnostic.version) · \(diagnostic.path)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         Text(diagnostic.discovery).font(.caption).foregroundStyle(.secondary)
                         if diagnostic.status != .ready {
-                            Text("Login command: \(diagnostic.harness == .codex ? "codex login" : "opencode auth login")")
+                            let loginCmd: String = switch diagnostic.harness {
+                            case .codex: "codex login"
+                            case .openCode: "opencode auth login"
+                            case .agy: "agy"
+                            case .fake: "demo"
+                            }
+                            Text("Login command: \(loginCmd)")
                                 .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
                         }
@@ -251,6 +275,7 @@ struct SettingsDetailView: View {
             Section("Overrides") {
                 TextField("Codex executable", text: Binding(get: { store.discoverySettings.executableOverrides[.codex] ?? "" }, set: { store.updateExecutableOverride($0, for: .codex) }))
                 TextField("OpenCode executable", text: Binding(get: { store.discoverySettings.executableOverrides[.openCode] ?? "" }, set: { store.updateExecutableOverride($0, for: .openCode) }))
+                TextField("Antigravity executable", text: Binding(get: { store.discoverySettings.executableOverrides[.agy] ?? "" }, set: { store.updateExecutableOverride($0, for: .agy) }))
             }
             Section("Custom model fallback") {
                 HStack {
@@ -260,6 +285,10 @@ struct SettingsDetailView: View {
                 HStack {
                     TextField("OpenCode native model ID", text: $store.customOpenCodeModel)
                     Button("Add") { store.addCustomModel(for: .openCode) }
+                }
+                HStack {
+                    TextField("Antigravity native model ID", text: $store.customAgyModel)
+                    Button("Add") { store.addCustomModel(for: .agy) }
                 }
                 Text("Custom IDs are not normalized. They stay unverified until a harness observes them.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -272,6 +301,8 @@ struct SettingsDetailView: View {
             }
             Section("Read-only verification") {
                 Label("Codex uses its app-server read-only sandbox.", systemImage: "checkmark.shield")
+                    .foregroundStyle(.secondary)
+                Label("Antigravity uses its CLI sandbox isolation.", systemImage: "checkmark.shield")
                     .foregroundStyle(.secondary)
                 Label("OpenCode read-only is blocked until a version-specific restriction and sentinel diagnostic succeeds.", systemImage: "exclamationmark.shield")
                     .foregroundStyle(.orange)

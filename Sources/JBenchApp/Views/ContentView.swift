@@ -7,6 +7,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(store: store)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
             Group {
                 switch store.section {
@@ -30,7 +31,6 @@ struct ContentView: View {
                 }
             }
         }
-        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1_040, minHeight: 680)
     }
 }

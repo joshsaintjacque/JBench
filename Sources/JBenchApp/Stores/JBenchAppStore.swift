@@ -96,6 +96,9 @@ final class JBenchAppStore: JBenchRunService {
     private var judgeEngine: JudgeEngine?
     private var judgeTask: Task<Void, Never>?
     private var judgeTaskToken: UUID?
+    private var automaticJudgeTasks: [UUID: Task<Void, Never>] = [:]
+    private var automaticJudgeTaskTokens: [UUID: UUID] = [:]
+    private var activeJudgeTaskCount = 0
     private var updateTask: Task<Void, Never>?
     private var activeRunID: UUID?
     private var activeRun: BenchmarkRun?
@@ -960,11 +963,13 @@ final class JBenchAppStore: JBenchRunService {
 
     func shutdownForTermination() async -> String {
         updateTask?.cancel()
-        let task = judgeTask
-        task?.cancel()
+        let judgeTasks = ([judgeTask] + Array(automaticJudgeTasks.values)).compactMap { $0 }
+        judgeTasks.forEach { $0.cancel() }
         judgeTask = nil
         judgeTaskToken = nil
-        if let task { await task.value }
+        automaticJudgeTasks.removeAll()
+        automaticJudgeTaskTokens.removeAll()
+        for task in judgeTasks { await task.value }
         guard let coordinator else {
             statusMessage = "Shutdown complete: no active local coordinator."
             return statusMessage
@@ -1046,16 +1051,20 @@ final class JBenchAppStore: JBenchRunService {
             ? activeRunStatus
             : "\(run.agents.count) lanes \(run.state == .completed ? "completed" : "finished with \(run.state.rawValue)")"
         await loadHistory()
-        if !run.judgeConfigurations.isEmpty, automaticJudgingRunIDs.insert(run.id).inserted { await launchJudgeTask(for: run) }
+        if !run.judgeConfigurations.isEmpty, automaticJudgingRunIDs.insert(run.id).inserted { launchJudgeTask(for: run) }
         if shouldNotify, notifyOnCompletion { notifyCompletion(for: run) }
     }
 
     private func runJudges(for run: BenchmarkRun) async {
         guard let judgeEngine, let coordinator else { return }
         guard !Task.isCancelled else { return }
+        activeJudgeTaskCount += 1
         isJudgingActive = true
-        judgeStatusMessage = "Judges are reviewing completed responses…"
-        defer { isJudgingActive = false }
+        if activeRunID == run.id { judgeStatusMessage = "Judges are reviewing completed responses…" }
+        defer {
+            activeJudgeTaskCount = max(0, activeJudgeTaskCount - 1)
+            isJudgingActive = activeJudgeTaskCount > 0
+        }
         do {
             let votes = await judgeEngine.judge(run: run)
             guard !Task.isCancelled else { return }
@@ -1071,17 +1080,21 @@ final class JBenchAppStore: JBenchRunService {
         }
     }
 
-    private func launchJudgeTask(for run: BenchmarkRun) async {
-        judgeTask?.cancel()
+    private func launchJudgeTask(for run: BenchmarkRun) {
+        guard automaticJudgeTasks[run.id] == nil else { return }
         let token = UUID()
-        judgeTaskToken = token
-        let task = Task { [weak self] in
+        automaticJudgeTaskTokens[run.id] = token
+        automaticJudgeTasks[run.id] = Task { [weak self] in
             guard let self else { return }
             await self.runJudges(for: run)
+            self.clearAutomaticJudgeTask(runID: run.id, token: token)
         }
-        judgeTask = task
-        await task.value
-        clearJudgeTaskIfOwned(token)
+    }
+
+    private func clearAutomaticJudgeTask(runID: UUID, token: UUID) {
+        guard automaticJudgeTaskTokens[runID] == token else { return }
+        automaticJudgeTasks[runID] = nil
+        automaticJudgeTaskTokens[runID] = nil
     }
 
     private func clearJudgeTaskIfOwned(_ token: UUID) {

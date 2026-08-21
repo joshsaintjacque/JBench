@@ -3,104 +3,16 @@ import JBenchCore
 
 struct HistoryView: View {
     @Bindable var store: JBenchAppStore
-    @State private var search = ""
-    @State private var directoryFilter = ""
-    @State private var modelFilter = ""
-    @State private var harnessFilter: HarnessKind?
-    @State private var verdictOnly = false
-    @State private var useDateRange = false
-    @State private var fromDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
-    @State private var toDate = Date.now
-
-    private var filtered: [HistoryPresentation] {
-        store.history.filter { item in
-            let textMatches = search.isEmpty || item.title.localizedCaseInsensitiveContains(search) || item.prompt.localizedCaseInsensitiveContains(search) || item.directory.localizedCaseInsensitiveContains(search)
-            let directoryMatches = directoryFilter.isEmpty || item.directory.localizedCaseInsensitiveContains(directoryFilter)
-            let harnessMatches = harnessFilter == nil || item.lanes.contains { $0.configuration.harness == harnessFilter }
-            let modelMatches = modelFilter.isEmpty || item.lanes.contains { $0.configuration.model.localizedCaseInsensitiveContains(modelFilter) }
-            let verdictMatches = !verdictOnly || store.hasVerdict(for: item.id)
-            let dateMatches = !useDateRange || (item.date >= Calendar.current.startOfDay(for: fromDate) && item.date <= Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: toDate)!)
-            return textMatches && directoryMatches && harnessMatches && modelMatches && verdictMatches && dateMatches
-        }
-    }
 
     var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Search runs", text: $search)
-                        .textFieldStyle(.plain)
-                    if !search.isEmpty {
-                        Button {
-                            search = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(8)
-                .background(Color(nsColor: .controlBackgroundColor))
-
-                Divider()
-
-                List(filtered, selection: $store.selectedHistoryID) { item in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.title).lineLimit(2)
-                        HStack { StateBadge(state: item.state); Text(item.date, format: .dateTime.month(.abbreviated).day().hour().minute()).font(.caption).foregroundStyle(.secondary) }
-                        HStack(spacing: 5) {
-                            Text(URL(fileURLWithPath: item.directory).lastPathComponent).lineLimit(1)
-                            Text("· \(item.lanes.count) agents")
-                            if store.hasVerdict(for: item.id) { Image(systemName: "star.fill").foregroundStyle(.orange) }
-                        }
-                        .font(.caption2).foregroundStyle(.secondary)
-                    }
-                    .tag(item.id)
-                }
-                .listStyle(.inset)
-                .safeAreaInset(edge: .bottom) {
-                    DisclosureGroup("Filters") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            TextField("Directory", text: $directoryFilter)
-                            TextField("Model", text: $modelFilter)
-                            Picker("Harness", selection: $harnessFilter) {
-                                Text("Any harness").tag(HarnessKind?.none)
-                                Text("Codex").tag(HarnessKind?.some(.codex))
-                                Text("OpenCode").tag(HarnessKind?.some(.openCode))
-                                Text("Antigravity (agy)").tag(HarnessKind?.some(.agy))
-                            }
-                            Toggle("Has verdict", isOn: $verdictOnly)
-                            Toggle("Date range", isOn: $useDateRange)
-                            if useDateRange {
-                                DatePicker("From", selection: $fromDate, displayedComponents: .date)
-                                DatePicker("To", selection: $toDate, displayedComponents: .date)
-                            }
-                            Button("Delete All History", role: .destructive) { store.prepareDeleteAllHistory() }
-                                .disabled(store.history.isEmpty)
-                        }
-                        .textFieldStyle(.roundedBorder)
-                        .padding(10)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
-                    .background(.bar)
-                }
+        Group {
+            if let item = store.selectedHistory {
+                HistoryDetail(store: store, item: item)
+            } else {
+                ContentUnavailableView("No matching runs", systemImage: "magnifyingglass")
             }
-            .frame(minWidth: 240, idealWidth: 280, maxWidth: 360)
-
-            Group {
-                if let item = store.selectedHistory ?? filtered.first {
-                    HistoryDetail(store: store, item: item)
-                } else {
-                    ContentUnavailableView("No matching runs", systemImage: "magnifyingglass")
-                }
-            }
-            .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .onAppear { if store.selectedHistoryID == nil { store.selectedHistoryID = store.history.first?.id } }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: store.selectedHistoryID) { _, _ in store.loadVerdictForSelectedHistory() }
         .confirmationDialog("Delete local history?", isPresented: $store.isShowingDeletionConfirmation, titleVisibility: .visible) {
             Button("Delete record", role: .destructive) { store.confirmHistoryDeletion(deleteEvidence: false) }
@@ -418,7 +330,7 @@ private struct NotificationsSettings: View {
     }
 }
 
-private struct StateBadge: View {
+struct StateBadge: View {
     let state: AggregateRunState
     private var color: Color { state == .completed ? .green : state == .partiallyCompleted ? .orange : .red }
     var body: some View {

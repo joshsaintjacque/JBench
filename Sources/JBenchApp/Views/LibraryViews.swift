@@ -68,7 +68,7 @@ private struct HistoryDetail: View {
                 if !item.judgeConfigurations.isEmpty {
                     HistoryJudgeResults(configurations: item.judgeConfigurations, votes: item.judgeVotes, lanes: item.lanes, hidesIdentity: store.hidesReviewIdentities)
                 }
-                LanesWorkspace(store: store, lanes: item.lanes, runID: item.id)
+                LanesWorkspace(store: store, lanes: item.lanes, runID: item.id, judgeVotes: item.judgeVotes)
             }
             .padding(20)
         }

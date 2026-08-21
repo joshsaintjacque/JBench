@@ -35,27 +35,31 @@ struct ContentView: View {
     }
 }
 
+private struct SidebarHistoryFilters: Equatable {
+    var search = ""
+    var directory = ""
+    var model = ""
+    var harness: HarnessKind?
+    var verdictOnly = false
+    var usesDateRange = false
+    var fromDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
+    var toDate = Date.now
+}
+
 private struct SidebarView: View {
     @Bindable var store: JBenchAppStore
-    @State private var search = ""
-    @State private var directoryFilter = ""
-    @State private var modelFilter = ""
-    @State private var harnessFilter: HarnessKind?
-    @State private var verdictOnly = false
-    @State private var useDateRange = false
-    @State private var fromDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
-    @State private var toDate = Date.now
+    @State private var filters = SidebarHistoryFilters()
     @State private var filtersExpanded = false
 
     private var filteredHistory: [HistoryPresentation] {
         store.history.filter { item in
-            let textMatches = search.isEmpty || item.title.localizedCaseInsensitiveContains(search) || item.prompt.localizedCaseInsensitiveContains(search) || item.directory.localizedCaseInsensitiveContains(search)
-            let directoryMatches = directoryFilter.isEmpty || item.directory.localizedCaseInsensitiveContains(directoryFilter)
-            let harnessMatches = harnessFilter == nil || item.lanes.contains { $0.configuration.harness == harnessFilter }
-            let modelMatches = modelFilter.isEmpty || item.lanes.contains { $0.configuration.model.localizedCaseInsensitiveContains(modelFilter) }
-            let verdictMatches = !verdictOnly || store.hasVerdict(for: item.id)
-            let endDate = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: toDate) ?? toDate
-            let dateMatches = !useDateRange || (item.date >= Calendar.current.startOfDay(for: fromDate) && item.date <= endDate)
+            let textMatches = filters.search.isEmpty || item.title.localizedCaseInsensitiveContains(filters.search) || item.prompt.localizedCaseInsensitiveContains(filters.search) || item.directory.localizedCaseInsensitiveContains(filters.search)
+            let directoryMatches = filters.directory.isEmpty || item.directory.localizedCaseInsensitiveContains(filters.directory)
+            let harnessMatches = filters.harness == nil || item.lanes.contains { $0.configuration.harness == filters.harness }
+            let modelMatches = filters.model.isEmpty || item.lanes.contains { $0.configuration.model.localizedCaseInsensitiveContains(filters.model) }
+            let verdictMatches = !filters.verdictOnly || store.hasVerdict(for: item.id)
+            let endDate = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: filters.toDate) ?? filters.toDate
+            let dateMatches = !filters.usesDateRange || (item.date >= Calendar.current.startOfDay(for: filters.fromDate) && item.date <= endDate)
             return textMatches && directoryMatches && harnessMatches && modelMatches && verdictMatches && dateMatches
         }
     }
@@ -71,11 +75,11 @@ private struct SidebarView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    TextField("Search runs", text: $search)
+                    TextField("Search runs", text: $filters.search)
                         .textFieldStyle(.plain)
-                    if !search.isEmpty {
+                    if !filters.search.isEmpty {
                         Button {
-                            search = ""
+                            filters.search = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundStyle(.secondary)
@@ -96,9 +100,9 @@ private struct SidebarView: View {
 
                 ForEach(filteredHistory) { item in
                     Button {
-                        store.section = .history
                         store.selectedHistoryID = item.id
                         store.loadVerdictForSelectedHistory()
+                        store.section = .history
                     } label: {
                         SidebarRunRow(item: item, isSelected: store.section == .history && store.selectedHistoryID == item.id, hasVerdict: store.hasVerdict(for: item.id))
                     }
@@ -108,7 +112,7 @@ private struct SidebarView: View {
                 }
 
                 if filteredHistory.isEmpty {
-                    Text(search.isEmpty ? "No runs yet" : "No matching runs")
+                    Text(filters.search.isEmpty ? "No runs yet" : "No matching runs")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 6)
@@ -117,19 +121,19 @@ private struct SidebarView: View {
 
                 DisclosureGroup("Filters", isExpanded: $filtersExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
-                        TextField("Directory", text: $directoryFilter)
-                        TextField("Model", text: $modelFilter)
-                        Picker("Harness", selection: $harnessFilter) {
+                        TextField("Directory", text: $filters.directory)
+                        TextField("Model", text: $filters.model)
+                        Picker("Harness", selection: $filters.harness) {
                             Text("Any harness").tag(HarnessKind?.none)
                             Text("Codex").tag(HarnessKind?.some(.codex))
                             Text("OpenCode").tag(HarnessKind?.some(.openCode))
                             Text("Antigravity (agy)").tag(HarnessKind?.some(.agy))
                         }
-                        Toggle("Has verdict", isOn: $verdictOnly)
-                        Toggle("Date range", isOn: $useDateRange)
-                        if useDateRange {
-                            DatePicker("From", selection: $fromDate, displayedComponents: .date)
-                            DatePicker("To", selection: $toDate, displayedComponents: .date)
+                        Toggle("Has verdict", isOn: $filters.verdictOnly)
+                        Toggle("Date range", isOn: $filters.usesDateRange)
+                        if filters.usesDateRange {
+                            DatePicker("From", selection: $filters.fromDate, displayedComponents: .date)
+                            DatePicker("To", selection: $filters.toDate, displayedComponents: .date)
                         }
                         Button("Delete All History", role: .destructive) { store.prepareDeleteAllHistory() }
                             .disabled(store.history.isEmpty)
@@ -177,17 +181,29 @@ private struct SidebarView: View {
             .padding(10)
             .background(.bar)
         }
+        .confirmationDialog("Delete all local history?", isPresented: $store.isShowingDeleteAllConfirmation, titleVisibility: .visible) {
+            Button("Delete all records", role: .destructive) { store.confirmDeleteAllHistory(deleteEvidence: false) }
+            Button("Delete all records and evidence", role: .destructive) { store.confirmDeleteAllHistory(deleteEvidence: true) }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(store.deleteAllImpact)
+        }
         .onAppear { reconcileHistorySelection() }
         .onChange(of: store.history) { _, _ in reconcileHistorySelection() }
-        .onChange(of: store.section) { _, _ in reconcileHistorySelection() }
-        .onChange(of: search) { _, _ in reconcileHistorySelection() }
-        .onChange(of: directoryFilter) { _, _ in reconcileHistorySelection() }
-        .onChange(of: modelFilter) { _, _ in reconcileHistorySelection() }
-        .onChange(of: harnessFilter) { _, _ in reconcileHistorySelection() }
-        .onChange(of: verdictOnly) { _, _ in reconcileHistorySelection() }
-        .onChange(of: useDateRange) { _, _ in reconcileHistorySelection() }
-        .onChange(of: fromDate) { _, _ in reconcileHistorySelection() }
-        .onChange(of: toDate) { _, _ in reconcileHistorySelection() }
+        .onChange(of: store.section) { _, _ in reconcileHistoryNavigation() }
+        .onChange(of: filters) { _, _ in reconcileHistorySelection() }
+    }
+
+    private func reconcileHistoryNavigation() {
+        guard store.section == .history else { return }
+        if let selectedID = store.selectedHistoryID,
+           store.history.contains(where: { $0.id == selectedID }),
+           !filteredHistory.contains(where: { $0.id == selectedID }) {
+            filters = SidebarHistoryFilters()
+            store.loadVerdictForSelectedHistory()
+            return
+        }
+        reconcileHistorySelection()
     }
 
     private func reconcileHistorySelection() {

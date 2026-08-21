@@ -25,13 +25,6 @@ struct HistoryView: View {
         } message: {
             Text(store.runAgainCommitMessage)
         }
-        .confirmationDialog("Delete all local history?", isPresented: $store.isShowingDeleteAllConfirmation, titleVisibility: .visible) {
-            Button("Delete all records", role: .destructive) { store.confirmDeleteAllHistory(deleteEvidence: false) }
-            Button("Delete all records and evidence", role: .destructive) { store.confirmDeleteAllHistory(deleteEvidence: true) }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text(store.deleteAllImpact)
-        }
         .alert("Rename run", isPresented: $store.isShowingHistoryTitleRename) {
             TextField("Title", text: $store.historyTitleRename)
             Button("Rename") { store.renameHistoryTitle() }

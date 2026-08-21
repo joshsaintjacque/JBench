@@ -1038,7 +1038,10 @@ final class JBenchAppStore: JBenchRunService {
             if runID == activeRunID, let index = lanes.firstIndex(where: { $0.id == agentRunID }) {
                 lanes[index].approval = approval
                 statusMessage = "Approval needed for lane \(index + 1)"
-                if notifyOnCompletion { notifyApproval(approval, lane: index + 1) }
+            }
+            if notifyOnCompletion,
+               let lane = (activeRunsByID[runID] ?? historyRuns[runID])?.agents.firstIndex(where: { $0.id == agentRunID }) {
+                notifyApproval(approval, lane: lane + 1)
             }
         case .diagnostic(let detail): statusMessage = detail
         }

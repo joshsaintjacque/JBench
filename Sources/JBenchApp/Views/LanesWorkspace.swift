@@ -7,9 +7,13 @@ struct LanesWorkspace: View {
     let lanes: [LanePresentation]
     var runID: UUID? = nil
     var judgeVotes: [JudgeVote]? = nil
+    var judgeConfigurations: [JudgeConfiguration]? = nil
 
     private var displayedJudgeVotes: [JudgeVote] { judgeVotes ?? store.judgeVotes }
-    private var judgeVoteLedger: JudgeVoteLedger { .init(votes: displayedJudgeVotes, lanes: lanes) }
+    private var displayedJudgeConfigurations: [JudgeConfiguration] { judgeConfigurations ?? store.judgeConfigurations }
+    private var judgeVoteLedger: JudgeVoteLedger {
+        .init(votes: displayedJudgeVotes, lanes: lanes, configuredJudges: displayedJudgeConfigurations)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -522,9 +526,16 @@ private struct JudgeVoteBadge: View {
 private struct JudgeVoteLedger {
     let votes: [JudgeVote]
     let lanes: [LanePresentation]
+    let configuredJudges: [JudgeConfiguration]
+
+    private var applicableVotes: [JudgeVote] {
+        guard !configuredJudges.isEmpty else { return votes }
+        let configuredJudgeIDs = Set(configuredJudges.map(\.id))
+        return votes.filter { configuredJudgeIDs.contains($0.judge.id) }
+    }
 
     private var castVotes: [JudgeVote] {
-        votes.filter { vote in
+        applicableVotes.filter { vote in
             guard vote.errorMessage == nil,
                   vote.winningAgentRunID != nil,
                   !(vote.winningBlindLabel?.isEmpty ?? true),
@@ -533,7 +544,10 @@ private struct JudgeVoteLedger {
         }
     }
 
-    private var noVoteCount: Int { votes.count - castVotes.count }
+    private var noVoteCount: Int {
+        guard !configuredJudges.isEmpty else { return max(0, votes.count - castVotes.count) }
+        return max(0, configuredJudges.count - Set(castVotes.map(\.judge.id)).count)
+    }
 
     private var candidateCounts: [String: Int] {
         Dictionary(grouping: castVotes.compactMap(\.winningBlindLabel), by: { $0 })
@@ -554,9 +568,10 @@ private struct JudgeVoteLedger {
     }
 
     var summary: String? {
-        guard !votes.isEmpty else { return nil }
+        guard !configuredJudges.isEmpty || !votes.isEmpty else { return nil }
         guard !castVotes.isEmpty else {
-            return votes.count == 1 ? "Judge vote: No vote" : "Judge votes: No votes"
+            let judgeCount = configuredJudges.isEmpty ? votes.count : configuredJudges.count
+            return judgeCount == 1 ? "Judge vote: No vote" : "Judge votes: No votes"
         }
 
         let ranked = candidateLabels.map { ($0, candidateCounts[$0] ?? 0) }

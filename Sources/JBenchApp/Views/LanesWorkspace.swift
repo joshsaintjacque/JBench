@@ -528,77 +528,17 @@ private struct JudgeVoteLedger {
     let lanes: [LanePresentation]
     let configuredJudges: [JudgeConfiguration]
 
-    private var applicableVotes: [JudgeVote] {
-        guard !configuredJudges.isEmpty else { return votes }
-        let configuredJudgeIDs = Set(configuredJudges.map(\.id))
-        return votes.filter { configuredJudgeIDs.contains($0.judge.id) }
-    }
-
-    private var castVotes: [JudgeVote] {
-        applicableVotes.filter { vote in
-            guard vote.errorMessage == nil,
-                  vote.winningAgentRunID != nil,
-                  !(vote.winningBlindLabel?.isEmpty ?? true),
-                  let winningAgentRunID = vote.winningAgentRunID else { return false }
-            return lanes.contains { $0.id == winningAgentRunID }
-        }
-    }
-
-    private var noVoteCount: Int {
-        guard !configuredJudges.isEmpty else { return max(0, votes.count - castVotes.count) }
-        return max(0, configuredJudges.count - Set(castVotes.map(\.judge.id)).count)
-    }
-
-    private var candidateCounts: [String: Int] {
-        Dictionary(grouping: castVotes.compactMap(\.winningBlindLabel), by: { $0 })
-            .mapValues(\.count)
-    }
-
     private var candidateLabels: [String] {
-        var labels = Set(candidateCounts.keys)
-        for index in lanes.sorted(by: Self.laneOrder).indices {
-            labels.insert(Self.candidateLabel(for: index))
-        }
-        return labels.sorted { lhs, rhs in
-            let leftCount = candidateCounts[lhs] ?? 0
-            let rightCount = candidateCounts[rhs] ?? 0
-            if leftCount != rightCount { return leftCount > rightCount }
-            return lhs.localizedStandardCompare(rhs) == .orderedAscending
-        }
+        lanes.sorted(by: Self.laneOrder).indices.map { Self.candidateLabel(for: $0) }
     }
 
     var summary: String? {
-        guard !configuredJudges.isEmpty || !votes.isEmpty else { return nil }
-        guard !castVotes.isEmpty else {
-            let judgeCount = configuredJudges.isEmpty ? votes.count : configuredJudges.count
-            return judgeCount == 1 ? "Judge vote: No vote" : "Judge votes: No votes"
-        }
-
-        let ranked = candidateLabels.map { ($0, candidateCounts[$0] ?? 0) }
-        let positiveRanked = ranked.filter { $0.1 > 0 }
-        guard let first = positiveRanked.first else { return "Judge vote: No vote" }
-        let top = positiveRanked.filter { $0.1 == first.1 }
-        let result: String
-        if top.count > 1 {
-            let labels = top.map(\.0)
-            result = labels.count == 2
-                ? "Tie \(labels[0]) and \(labels[1]) \(first.1)-\(first.1)"
-                : "Tie \(joinedLabels(labels)) \(first.1) each"
-        } else if noVoteCount == 0, ranked.count == 2 {
-            result = "\(first.0) wins \(first.1)-\(ranked[1].1)"
-        } else if ranked.count > 2 {
-            result = "\(first.0) leads \(ranked.map { String($0.1) }.joined(separator: "-"))"
-        } else {
-            result = "\(first.0) has \(first.1) \(first.1 == 1 ? "vote" : "votes")"
-        }
-
-        let suffix: String
-        if noVoteCount == 0 {
-            suffix = ""
-        } else {
-            suffix = " · \(noVoteCount) no \(noVoteCount == 1 ? "vote" : "votes")"
-        }
-        return "Judge \(castVotes.count == 1 ? "vote" : "votes"): \(result)\(suffix)"
+        JudgeVoteResultSummary.text(
+            votes: votes,
+            candidateLabels: candidateLabels,
+            configuredJudges: configuredJudges,
+            validCandidateIDs: Set(lanes.map(\.id))
+        )
     }
 
     private static func laneOrder(_ lhs: LanePresentation, _ rhs: LanePresentation) -> Bool {
@@ -616,14 +556,6 @@ private struct JudgeVoteLedger {
         return result
     }
 
-    private func joinedLabels(_ labels: [String]) -> String {
-        switch labels.count {
-        case 0: return ""
-        case 1: return labels[0]
-        case 2: return "\(labels[0]) and \(labels[1])"
-        default: return labels.dropLast().joined(separator: ", ") + ", and \(labels.last!)"
-        }
-    }
 }
 
 private func normalizedJudgeName(_ name: String) -> String {

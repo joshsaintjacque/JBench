@@ -20,6 +20,7 @@ struct LanesWorkspace: View {
                 .frame(width: 220)
 
                 overallStatusView
+                winnerSummaryView
 
                 Spacer()
                 Menu("Export", systemImage: "square.and.arrow.up") {
@@ -195,6 +196,59 @@ struct LanesWorkspace: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var winnerSummaryView: some View {
+        if let verdict = store.currentVerdict {
+            if let winnerID = verdict.winningAgentRunID,
+               let winner = lanes.first(where: { $0.id == winnerID }) {
+                WinnerBadge(label: "Winner: \(winnerLabel(for: winner))")
+            } else {
+                neutralVerdictBadge(title: "Verdict skipped", systemImage: "trophy")
+            }
+        } else if let winner = lanes.first(where: { $0.id == store.winningLaneID }) {
+            WinnerBadge(label: store.reviewMode == .blindReview
+                ? "Selected candidate: \(winnerLabel(for: winner))"
+                : "Selected: \(winnerLabel(for: winner))")
+        } else {
+            neutralVerdictBadge(title: "No winner selected", systemImage: "trophy")
+        }
+    }
+
+    private func neutralVerdictBadge(title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Color.secondary.opacity(0.1), in: Capsule())
+            .overlay { Capsule().strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5) }
+    }
+
+    private func winnerLabel(for lane: LanePresentation) -> String {
+        if store.reviewMode == .blindReview && !store.isRevealOn {
+            let ordered = lanes.sorted {
+                if $0.blindReviewOrder != $1.blindReviewOrder {
+                    return $0.blindReviewOrder < $1.blindReviewOrder
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            let index = ordered.firstIndex(where: { $0.id == lane.id }) ?? 0
+            guard index < 26, let scalar = UnicodeScalar(65 + index) else {
+                return "Candidate \(index + 1)"
+            }
+            return "Candidate \(String(scalar))"
+        }
+
+        let harness: String
+        switch lane.configuration.harness {
+        case .codex: harness = "Codex"
+        case .openCode: harness = "OpenCode"
+        case .agy: harness = "Antigravity"
+        case .fake: harness = "Demo"
+        }
+        return "\(harness) · \(lane.configuration.model)"
+    }
 }
 
 private struct LaneCard: View {
@@ -211,6 +265,10 @@ private struct LaneCard: View {
     }
 
     var body: some View {
+        let isPersistedWinner = store.currentVerdict?.winningAgentRunID == lane.id
+        let isDraftSelection = store.currentVerdict == nil && store.winningLaneID == lane.id
+        let isWinner = isPersistedWinner || isDraftSelection
+
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top) {
                 Image(systemName: lane.configuration.harness == .codex ? "sparkles" : (lane.configuration.harness == .agy ? "atom" : "hexagon.fill"))
@@ -224,6 +282,9 @@ private struct LaneCard: View {
                             .font(.headline)
                             .lineLimit(2)
                         LaneStatusBadge(state: lane.state)
+                        if isWinner {
+                            WinnerBadge(label: isPersistedWinner ? "Winner" : "Selected")
+                        }
                     }
                     Label(lane.activity, systemImage: stateIcon)
                         .font(.caption)
@@ -288,9 +349,23 @@ private struct LaneCard: View {
             }
         }
         .padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(alignment: .top) { Rectangle().fill(tint).frame(height: 3).clipShape(RoundedRectangle(cornerRadius: 12)) }
-        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary) }
+        .background(
+            isWinner ? Color.green.opacity(0.08) : Color(nsColor: .windowBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(isWinner ? Color.green : tint)
+                .frame(height: isWinner ? 5 : 3)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(
+                    isWinner ? Color.green.opacity(0.65) : Color.secondary.opacity(0.2),
+                    lineWidth: isWinner ? 1.5 : 0.75
+                )
+        }
         .contextMenu {
             Button("Copy response") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(lane.output, forType: .string) }
             if !lane.state.isTerminal { Button("Cancel lane", role: .destructive) { store.cancel(laneID: lane.id) } }
@@ -586,6 +661,10 @@ private struct BlindReviewView: View {
                 .accessibilityLabel("Previous candidate")
 
                 ForEach(Array(orderedLanes.enumerated()), id: \.element.id) { index, lane in
+                    let isPersistedWinner = store.currentVerdict?.winningAgentRunID == lane.id
+                    let isDraftSelection = store.currentVerdict == nil && store.winningLaneID == lane.id
+                    let isWinner = isPersistedWinner || isDraftSelection
+
                     Button {
                         selectLane(lane.id)
                     } label: {
@@ -600,23 +679,33 @@ private struct BlindReviewView: View {
                                     .accessibilityLabel("Pinned for comparison")
                             }
                             LaneStatusBadge(state: lane.state)
+                            if isWinner {
+                                WinnerBadge(label: isPersistedWinner ? "Winner" : "Selected")
+                            }
                         }
                         .padding(.horizontal, 11)
                         .padding(.vertical, 8)
                         .frame(minWidth: 132)
                         .background(
-                            activeLaneID == lane.id ? Color.accentColor.opacity(0.10) : Color.clear,
+                            isWinner
+                                ? Color.green.opacity(0.12)
+                                : activeLaneID == lane.id ? Color.accentColor.opacity(0.10) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 8)
                         )
                         .overlay {
                             RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(activeLaneID == lane.id ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: activeLaneID == lane.id ? 1.2 : 0.7)
+                                .strokeBorder(
+                                    isWinner ? Color.green.opacity(0.7) : activeLaneID == lane.id ? Color.accentColor : Color.secondary.opacity(0.18),
+                                    lineWidth: isWinner || activeLaneID == lane.id ? 1.2 : 0.7
+                                )
                         }
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(candidateTitle(for: lane, index: index))
                     .accessibilityValue(
-                        lane.state.rawValue + (pinnedLaneID == lane.id ? ", pinned for comparison" : "")
+                        lane.state.rawValue
+                            + (isPersistedWinner ? ", winner" : isDraftSelection ? ", selected candidate" : "")
+                            + (pinnedLaneID == lane.id ? ", pinned for comparison" : "")
                     )
                 }
 
@@ -1128,13 +1217,16 @@ private struct BlindVerdictInspector: View {
 
     private var isPinned: Bool { pinnedLaneID == lane.id }
     private var hasSelection: Bool { store.winningLaneID == lane.id }
+    private var isPersistedWinner: Bool { store.currentVerdict?.winningAgentRunID == lane.id }
+    private var isDraftSelection: Bool { store.currentVerdict == nil && hasSelection }
+    private var isWinner: Bool { isPersistedWinner || isDraftSelection }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 15) {
                 HStack(alignment: .top, spacing: 8) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Select \(candidateTitle)")
+                        Text(isPersistedWinner ? "Winner: \(candidateTitle)" : isDraftSelection ? "Selected: \(candidateTitle)" : "Select \(candidateTitle)")
                             .font(.title3.weight(.semibold))
                             .lineLimit(2)
                         Text(statusDescription)
@@ -1143,9 +1235,12 @@ private struct BlindVerdictInspector: View {
                     }
                     Spacer(minLength: 0)
                     LaneStatusBadge(state: lane.state)
+                    if isWinner {
+                        WinnerBadge(label: isPersistedWinner ? "Winner" : "Selected")
+                    }
                 }
 
-                Text("Choose the winner for this run. You can add a note to explain why this response won.")
+                Text(inspectorDescription)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1166,7 +1261,10 @@ private struct BlindVerdictInspector: View {
                 Button {
                     store.winningLaneID = lane.id
                 } label: {
-                    Label(hasSelection ? "Selected \(candidateTitle)" : "Select \(candidateTitle)", systemImage: hasSelection ? "checkmark.circle.fill" : "checkmark.circle")
+                    Label(
+                        isPersistedWinner ? "Winner selected" : isDraftSelection ? "Selected candidate" : "Select candidate",
+                        systemImage: isWinner ? "checkmark.circle.fill" : "checkmark.circle"
+                    )
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -1190,6 +1288,25 @@ private struct BlindVerdictInspector: View {
                 verdictActions
             }
             .padding(22)
+        }
+        .background(
+            isWinner ? Color.green.opacity(0.08) : Color(nsColor: .windowBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay(alignment: .top) {
+            if isWinner {
+                Rectangle()
+                    .fill(Color.green)
+                    .frame(height: 5)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(
+                    isWinner ? Color.green.opacity(0.65) : Color.secondary.opacity(0.2),
+                    lineWidth: isWinner ? 1.5 : 0.75
+                )
         }
     }
 
@@ -1242,6 +1359,16 @@ private struct BlindVerdictInspector: View {
         case .interrupted: "Run interrupted"
         }
     }
+
+    private var inspectorDescription: String {
+        if isPersistedWinner {
+            return "This response is the recorded winner for this run. You can update the verdict or add a note."
+        }
+        if isDraftSelection {
+            return "This candidate is selected but not saved yet. Save the verdict to record it as the winner."
+        }
+        return "Choose the winner for this run. You can add a note to explain why this response won."
+    }
 }
 
 private struct FocusReaderSectionPositionKey: PreferenceKey {
@@ -1259,6 +1386,21 @@ private struct MetricItem: View {
             HStack(spacing: 4) { Image(systemName: icon).foregroundStyle(color); Text(value).font(.caption).lineLimit(1) }
             Text(label).font(.caption2).foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct WinnerBadge: View {
+    let label: String
+
+    var body: some View {
+        Label(label, systemImage: "trophy.fill")
+            .font(.caption2.bold())
+            .foregroundStyle(.green)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.green.opacity(0.14), in: Capsule())
+            .overlay { Capsule().strokeBorder(Color.green.opacity(0.4), lineWidth: 0.75) }
+            .accessibilityLabel(label)
     }
 }
 

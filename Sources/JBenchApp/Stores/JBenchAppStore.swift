@@ -242,7 +242,7 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func rerunJudges() {
-        guard canRerunJudges, var run = activeRun, let historyStore else {
+        guard canRerunJudges, var run = activeRun, let coordinator else {
             statusMessage = "Judges need a completed run with at least two responses."
             return
         }
@@ -258,9 +258,9 @@ final class JBenchAppStore: JBenchRunService {
             guard let self else { return }
             defer { self.clearJudgeTaskIfOwned(token) }
             do {
-                try await historyStore.saveRun(run)
+                let canonical = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: [])
                 guard !Task.isCancelled else { return }
-                await self.runJudges(for: run)
+                await self.runJudges(for: canonical)
             } catch {
                 guard !Task.isCancelled else { return }
                 self.judgeStatusMessage = "Could not save judge changes: \(self.actionable(error))"
@@ -1018,7 +1018,7 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     private func runJudges(for run: BenchmarkRun) async {
-        guard let judgeEngine, let historyStore else { return }
+        guard let judgeEngine, let coordinator else { return }
         guard activeRunID == run.id, !Task.isCancelled else { return }
         isJudgingActive = true
         judgeStatusMessage = "Judges are reviewing completed responses…"
@@ -1026,7 +1026,9 @@ final class JBenchAppStore: JBenchRunService {
             if activeRunID == run.id { isJudgingActive = false }
         }
         do {
-            let judged = try await judgeEngine.judgeAndPersist(run: run, history: historyStore)
+            let votes = await judgeEngine.judge(run: run)
+            guard activeRunID == run.id, !Task.isCancelled else { return }
+            let judged = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: votes)
             guard activeRunID == run.id, !Task.isCancelled else { return }
             activeRun = judged
             judgeVotes = judged.judgeVotes

@@ -5,7 +5,7 @@ import Testing
 struct JudgeEngineTests {
     @Test func blindOrderAndIdentityAreStableAndPacketOmitsHarnessMetadata() async throws {
         let first = UUID(); let second = UUID(); let runID = UUID()
-        let run = try makeRun(id: runID, agents: [completed(first, runID: runID, order: 1, blind: 0, response: "first"), completed(second, runID: runID, order: 0, blind: 1, response: "second")], judges: [judge()])
+        let run = try makeRun(id: runID, prompt: "Explain the requested behavior.", agents: [completed(first, runID: runID, order: 1, blind: 0, response: "first"), completed(second, runID: runID, order: 0, blind: 1, response: "second")], judges: [judge()])
         #expect(JudgeEngine.blindCandidates(for: run).map(\.label) == ["A", "B"])
         #expect(JudgeEngine.blindCandidates(for: run).map(\.agentRunID) == [first, second])
         let adapter = CapturingJudgeAdapter(response: #"{"winner":"B","reason":"better"}"#)
@@ -15,6 +15,10 @@ struct JudgeEngineTests {
         #expect(prompt?.contains("fake") == false)
         #expect(prompt?.contains("judge-model") == false)
         #expect(prompt?.contains("Candidate A") == true)
+        #expect(prompt?.contains("ORIGINAL TASK\nExplain the requested behavior.") == true)
+        let request = try #require(await adapter.requests.first)
+        #expect(request.configuration.approvalPolicy == .denyAll)
+        #expect(try #require(request.configuration.timeoutSeconds) == 1_800.0)
     }
 
     @Test func failedEarlierLaneDoesNotRelabelLaterBlindCandidate() throws {
@@ -124,16 +128,66 @@ struct JudgeEngineTests {
         _ = await task.value
     }
 
+    @Test func judgeTimeoutStopsTheOwnedAttemptAndReturnsAnErrorVote() async throws {
+        let runID = UUID(); let a = UUID(); let b = UUID()
+        let run = try makeRun(id: runID, agents: [completed(a, runID: runID, order: 0, blind: 0, response: "a"), completed(b, runID: runID, order: 1, blind: 1, response: "b")], judges: [judge()])
+        let adapter = CancellationProbeAdapter()
+        let votes = await JudgeEngine(adapters: [adapter], judgeTimeoutSeconds: 0.01).judge(run: run)
+
+        let vote = try #require(votes.first)
+        #expect(vote.winningAgentRunID == nil)
+        #expect(vote.errorMessage?.contains("timed out") == true)
+        #expect(await adapter.shutdownIDs.contains(vote.id))
+    }
+
+    @Test func oversizedInputFailsBeforeLaunchingTheHarness() async throws {
+        let runID = UUID(); let a = UUID(); let b = UUID()
+        let run = try makeRun(id: runID, agents: [completed(a, runID: runID, order: 0, blind: 0, response: String(repeating: "a", count: 500)), completed(b, runID: runID, order: 1, blind: 1, response: "b")], judges: [judge()])
+        let adapter = CapturingJudgeAdapter(response: #"{"winner":"A","reason":"ok"}"#)
+        let votes = await JudgeEngine(adapters: [adapter], maxPromptBytes: 128).judge(run: run)
+
+        #expect(votes.first?.errorMessage?.contains("safety limit") == true)
+        #expect(await adapter.requests.isEmpty)
+    }
+
+    @Test func failedOrUnterminatedStreamsCannotRecordVotes() async throws {
+        let runID = UUID(); let a = UUID(); let b = UUID()
+        let run = try makeRun(id: runID, agents: [completed(a, runID: runID, order: 0, blind: 0, response: "a"), completed(b, runID: runID, order: 1, blind: 1, response: "b")], judges: [judge()])
+        let partial = AdapterEvent(kind: .outputDelta, text: #"{"winner":"A","reason":"partial"}"#)
+        let failedVotes = await JudgeEngine(adapters: [EventSequenceJudgeAdapter(events: [partial, .init(kind: .failed, text: "native failure")])]).judge(run: run)
+        let incompleteVotes = await JudgeEngine(adapters: [EventSequenceJudgeAdapter(events: [partial])]).judge(run: run)
+
+        #expect(failedVotes.first?.winningAgentRunID == nil)
+        #expect(failedVotes.first?.errorMessage == "native failure")
+        #expect(incompleteVotes.first?.winningAgentRunID == nil)
+        #expect(incompleteVotes.first?.errorMessage?.contains("without a successful completion event") == true)
+    }
+
     private func judge(name: String = "Judge", model: String = "judge-model") -> JudgeConfiguration { .init(name: name, harness: .fake, model: model, steeringPrompt: "focus") }
     private func completed(_ id: UUID, runID: UUID, order: Int, blind: Int, response: String) -> AgentRun { let c = AgentConfiguration(harness: .fake, model: "candidate-model"); return .init(id: id, runID: runID, displayOrder: order, blindReviewOrder: blind, requested: c, attempts: [.init(agentRunID: id, number: 1, state: .completed, requested: c, finalResponse: response)]) }
-    private func makeRun(id: UUID, agents: [AgentRun], judges: [JudgeConfiguration]) throws -> BenchmarkRun { try .init(id: id, prompt: "p", directoryPath: "/tmp", repositoryState: .cleanGit, executionMode: .readOnly, rawEvidenceDirectory: "/tmp", agents: agents, judgeConfigurations: judges) }
+    private func makeRun(id: UUID, prompt: String = "p", agents: [AgentRun], judges: [JudgeConfiguration]) throws -> BenchmarkRun { try .init(id: id, prompt: prompt, directoryPath: "/tmp", repositoryState: .cleanGit, executionMode: .readOnly, rawEvidenceDirectory: "/tmp", agents: agents, judgeConfigurations: judges) }
 }
 
 private actor CapturingJudgeAdapter: HarnessAdapter {
     nonisolated let kind: HarnessKind = .fake; nonisolated let supportsVerifiedReadOnly = true
-    let response: String; let failingModel: String?; private(set) var prompt: String?
+    let response: String; let failingModel: String?; private(set) var prompt: String?; private(set) var requests: [HarnessRequest] = []
     init(response: String, failingModel: String? = nil) { self.response = response; self.failingModel = failingModel }
-    func events(for request: HarnessRequest) async -> AsyncThrowingStream<AdapterEvent, Error> { prompt = request.prompt; if request.configuration.model == failingModel { return AsyncThrowingStream { $0.finish(throwing: JBenchCoreError.storage("failed")) } }; return AsyncThrowingStream { continuation in continuation.yield(.init(kind: .outputDelta, text: response, rawJSON: "{\"event\":\"output\"}")); continuation.yield(.init(kind: .completed, rawJSON: "{\"event\":\"completed\"}")); continuation.finish() } }
+    func events(for request: HarnessRequest) async -> AsyncThrowingStream<AdapterEvent, Error> { prompt = request.prompt; requests.append(request); if request.configuration.model == failingModel { return AsyncThrowingStream { $0.finish(throwing: JBenchCoreError.storage("failed")) } }; return AsyncThrowingStream { continuation in continuation.yield(.init(kind: .outputDelta, text: response, rawJSON: "{\"event\":\"output\"}")); continuation.yield(.init(kind: .completed, rawJSON: "{\"event\":\"completed\"}")); continuation.finish() } }
+    func reply(_ reply: ApprovalReply, to request: ApprovalRequest, attemptID: UUID) async throws {}
+    func cancel(attemptID: UUID) async {}
+}
+
+private actor EventSequenceJudgeAdapter: HarnessAdapter {
+    nonisolated let kind: HarnessKind = .fake
+    nonisolated let supportsVerifiedReadOnly = true
+    let eventsToEmit: [AdapterEvent]
+    init(events: [AdapterEvent]) { eventsToEmit = events }
+    func events(for request: HarnessRequest) async -> AsyncThrowingStream<AdapterEvent, Error> {
+        AsyncThrowingStream { continuation in
+            eventsToEmit.forEach { continuation.yield($0) }
+            continuation.finish()
+        }
+    }
     func reply(_ reply: ApprovalReply, to request: ApprovalRequest, attemptID: UUID) async throws {}
     func cancel(attemptID: UUID) async {}
 }

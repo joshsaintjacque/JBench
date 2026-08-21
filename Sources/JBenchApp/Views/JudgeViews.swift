@@ -20,7 +20,7 @@ struct JudgesInspector: View {
                     }
                     Spacer()
                     Button("Add Judge", systemImage: "plus") { store.addJudge(); selectedJudgeID = store.judgeConfigurations.last?.id }
-                        .disabled(store.isJudgingActive)
+                        .disabled(store.isJudgingActive || store.isBackgroundRunActive)
                 }
                 if store.judgeConfigurations.isEmpty {
                     ContentUnavailableView("No judges configured", systemImage: "person.crop.circle.badge.questionmark", description: Text("Candidate results remain available without AI judges."))
@@ -136,6 +136,6 @@ private struct JudgeEditor: View {
                     .disabled(store.isJudgingActive || !store.canRerunJudges)
             }
         }
-        .disabled(store.isJudgingActive)
+        .disabled(store.isJudgingActive || store.isBackgroundRunActive)
     }
 }

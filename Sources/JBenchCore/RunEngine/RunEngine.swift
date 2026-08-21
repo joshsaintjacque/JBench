@@ -334,6 +334,30 @@ public actor RunCoordinator {
         return restored
     }
 
+    /// Keeps judge state in the coordinator's canonical run before persisting it.
+    /// Export and retry paths read this cache, so judge writes must not bypass it.
+    public func updateJudgeResults(runID: UUID, configurations: [JudgeConfiguration], votes: [JudgeVote]) async throws -> BenchmarkRun {
+        guard votes.allSatisfy({ $0.runID == runID }) else {
+            throw JBenchCoreError.storage("A judge vote must belong to the run being updated.")
+        }
+        let existing: BenchmarkRun?
+        if let cached = runs[runID] { existing = cached }
+        else { existing = try await history.run(id: runID) }
+        guard var run = existing else {
+            throw JBenchCoreError.storage("The run no longer exists.")
+        }
+        run.judgeConfigurations = configurations
+        run.judgeVotes = votes
+        runs[runID] = run
+        do {
+            try await persist(run)
+        } catch {
+            runs[runID] = nil
+            throw error
+        }
+        return run
+    }
+
     public func runs() async throws -> [BenchmarkRun] { try await history.search() }
 
     public func activeRuns() -> [BenchmarkRun] { runs.values.filter { !$0.agents.allSatisfy { $0.state.isTerminal } }.sorted { $0.createdAt < $1.createdAt } }

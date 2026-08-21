@@ -64,6 +64,34 @@ struct RunCoordinatorTests {
         #expect(finished.agents[1].state == .completed)
     }
 
+    @Test func judgeResultsUpdateTheCanonicalRunAndSurviveLaneRetry() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "jbench-judge-cache-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let history = try SQLiteHistoryStore(databaseURL: root.appending(path: "history.sqlite"))
+        let evidence = try EvidenceStore(rootDirectory: root.appending(path: "evidence", directoryHint: .isDirectory))
+        let fake = FakeHarnessAdapter(plans: [
+            "good": .successful(response: "good"),
+            "bad": .init(events: [.init(kind: .started), .init(kind: .failed, text: "fixture failure")])
+        ])
+        let coordinator = RunCoordinator(adapters: [fake], history: history, evidence: evidence)
+        let created = try await coordinator.start(.init(prompt: "compare", directoryPath: root.path, repositoryState: .cleanGit, executionMode: .readOnly, configurations: [.init(harness: .fake, model: "good"), .init(harness: .fake, model: "bad")]))
+        let finished = try await terminalRun(created.id, from: coordinator)
+        let judge = JudgeConfiguration(name: "Correctness", harness: .fake, model: "judge")
+        let winnerID = finished.agents[0].id
+        let vote = JudgeVote(runID: finished.id, judge: judge, winningAgentRunID: winnerID, winningBlindLabel: "A", reasoning: "better")
+
+        let judged = try await coordinator.updateJudgeResults(runID: finished.id, configurations: [judge], votes: [vote])
+        #expect(judged.judgeVotes == [vote])
+        #expect(try await coordinator.run(id: finished.id)?.judgeVotes == [vote])
+        #expect(try await history.run(id: finished.id)?.judgeVotes == [vote])
+
+        let failedAttemptID = try #require(finished.agents[1].attempts.last?.id)
+        _ = try await coordinator.retry(failedAttemptID: failedAttemptID)
+        let retried = try await terminalRun(created.id, from: coordinator)
+        #expect(retried.judgeVotes == [vote])
+        #expect(try await history.run(id: finished.id)?.judgeVotes == [vote])
+    }
+
     private func terminalRun(_ id: UUID, from coordinator: RunCoordinator) async throws -> BenchmarkRun {
         for _ in 0..<200 {
             if let run = try await coordinator.run(id: id), run.agents.allSatisfy({ $0.state.isTerminal }) {

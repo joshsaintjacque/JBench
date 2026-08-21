@@ -607,6 +607,10 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func prepareHistoryDeletion(_ runID: UUID) {
+        guard activeRunsByID[runID] == nil else {
+            statusMessage = "Active runs cannot be deleted until every lane finishes."
+            return
+        }
         Task {
             do {
                 guard let preview = try await historyStore?.deletionPreview(for: runID) else { statusMessage = "This history record no longer exists."; return }
@@ -634,6 +638,10 @@ final class JBenchAppStore: JBenchRunService {
             do {
                 let previews = try await historyStore?.deletionPreviews() ?? []
                 guard !previews.isEmpty else { statusMessage = "History is already empty."; return }
+                guard previews.allSatisfy({ activeRunsByID[$0.runID] == nil }) else {
+                    statusMessage = "Active runs cannot be deleted until every lane finishes."
+                    return
+                }
                 if let blocked = previews.first(where: { !$0.canDelete }) {
                     statusMessage = blocked.refusalReason ?? "Resolve pending worktrees before deleting history."
                     return
@@ -647,6 +655,11 @@ final class JBenchAppStore: JBenchRunService {
     func confirmDeleteAllHistory(deleteEvidence: Bool) {
         let ids = Set(deleteAllPreviews.map(\.runID))
         guard !ids.isEmpty else { return }
+        guard ids.allSatisfy({ activeRunsByID[$0] == nil }) else {
+            statusMessage = "Active runs cannot be deleted until every lane finishes."
+            deleteAllPreviews = []
+            return
+        }
         Task {
             do {
                 try await historyStore?.deleteAll(confirmation: .init(runIDs: ids, deleteEvidence: deleteEvidence), evidenceStore: evidenceStore)
@@ -661,6 +674,11 @@ final class JBenchAppStore: JBenchRunService {
 
     func confirmHistoryDeletion(deleteEvidence: Bool) {
         guard let preview = deletionPreview else { return }
+        guard activeRunsByID[preview.runID] == nil else {
+            statusMessage = "Active runs cannot be deleted until every lane finishes."
+            deletionPreview = nil
+            return
+        }
         Task {
             do {
                 try await historyStore?.deleteRun(id: preview.runID, confirmation: .init(runIDs: [preview.runID], deleteEvidence: deleteEvidence), evidenceStore: evidenceStore)

@@ -199,17 +199,24 @@ struct LanesWorkspace: View {
 
     @ViewBuilder
     private var winnerSummaryView: some View {
-        if let verdict = store.currentVerdict {
-            if let winnerID = verdict.winningAgentRunID,
-               let winner = lanes.first(where: { $0.id == winnerID }) {
-                WinnerBadge(label: "Winner: \(winnerLabel(for: winner))")
+        if store.hasPendingVerdictSelection {
+            if let winner = lanes.first(where: { $0.id == store.winningLaneID }) {
+                WinnerBadge(label: store.reviewMode == .blindReview
+                    ? "Selected candidate: \(winnerLabel(for: winner))"
+                    : "Selected: \(winnerLabel(for: winner))")
+            } else {
+                neutralVerdictBadge(title: "No winner selected", systemImage: "trophy")
+            }
+        } else if let verdict = store.currentVerdict {
+            if let winnerID = verdict.winningAgentRunID {
+                if let winner = lanes.first(where: { $0.id == winnerID }) {
+                    WinnerBadge(label: "Winner: \(winnerLabel(for: winner))")
+                } else {
+                    neutralVerdictBadge(title: "Recorded winner unavailable", systemImage: "trophy")
+                }
             } else {
                 neutralVerdictBadge(title: "Verdict skipped", systemImage: "trophy")
             }
-        } else if let winner = lanes.first(where: { $0.id == store.winningLaneID }) {
-            WinnerBadge(label: store.reviewMode == .blindReview
-                ? "Selected candidate: \(winnerLabel(for: winner))"
-                : "Selected: \(winnerLabel(for: winner))")
         } else {
             neutralVerdictBadge(title: "No winner selected", systemImage: "trophy")
         }
@@ -265,8 +272,8 @@ private struct LaneCard: View {
     }
 
     var body: some View {
-        let isPersistedWinner = store.currentVerdict?.winningAgentRunID == lane.id
-        let isDraftSelection = store.currentVerdict == nil && store.winningLaneID == lane.id
+        let isPersistedWinner = store.isPersistedWinner(for: lane.id)
+        let isDraftSelection = store.isDraftWinnerSelection(for: lane.id)
         let isWinner = isPersistedWinner || isDraftSelection
 
         VStack(alignment: .leading, spacing: 13) {
@@ -661,8 +668,8 @@ private struct BlindReviewView: View {
                 .accessibilityLabel("Previous candidate")
 
                 ForEach(Array(orderedLanes.enumerated()), id: \.element.id) { index, lane in
-                    let isPersistedWinner = store.currentVerdict?.winningAgentRunID == lane.id
-                    let isDraftSelection = store.currentVerdict == nil && store.winningLaneID == lane.id
+                    let isPersistedWinner = store.isPersistedWinner(for: lane.id)
+                    let isDraftSelection = store.isDraftWinnerSelection(for: lane.id)
                     let isWinner = isPersistedWinner || isDraftSelection
 
                     Button {
@@ -1216,9 +1223,8 @@ private struct BlindVerdictInspector: View {
     @Binding var pinnedLaneID: UUID?
 
     private var isPinned: Bool { pinnedLaneID == lane.id }
-    private var hasSelection: Bool { store.winningLaneID == lane.id }
-    private var isPersistedWinner: Bool { store.currentVerdict?.winningAgentRunID == lane.id }
-    private var isDraftSelection: Bool { store.currentVerdict == nil && hasSelection }
+    private var isPersistedWinner: Bool { store.isPersistedWinner(for: lane.id) }
+    private var isDraftSelection: Bool { store.isDraftWinnerSelection(for: lane.id) }
     private var isWinner: Bool { isPersistedWinner || isDraftSelection }
 
     var body: some View {

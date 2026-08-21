@@ -163,6 +163,24 @@ final class JBenchAppStore: JBenchRunService {
 
     var selectedHistory: HistoryPresentation? { history.first(where: { $0.id == selectedHistoryID }) }
     func hasVerdict(for runID: UUID) -> Bool { verdicts[runID] != nil }
+    /// The persisted verdict for the run currently shown in the review workspace.
+    var currentVerdict: Verdict? {
+        guard let targetID = verdictTargetID else { return nil }
+        return verdicts[targetID]
+    }
+    /// Whether the visible selection differs from the persisted verdict.
+    var hasPendingVerdictSelection: Bool {
+        guard let winningLaneID else { return false }
+        return winningLaneID != currentVerdict?.winningAgentRunID
+    }
+
+    func isDraftWinnerSelection(for laneID: UUID) -> Bool {
+        hasPendingVerdictSelection && winningLaneID == laneID
+    }
+
+    func isPersistedWinner(for laneID: UUID) -> Bool {
+        !hasPendingVerdictSelection && currentVerdict?.winningAgentRunID == laneID
+    }
     var canUseEditable: Bool { repositorySnapshot.state == .cleanGit }
     var repositoryExplanation: String {
         switch repositorySnapshot.state {

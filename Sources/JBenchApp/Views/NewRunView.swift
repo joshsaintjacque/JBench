@@ -8,7 +8,7 @@ struct NewRunView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if store.lanes.isEmpty || showsSetup {
+                if store.lanes.isEmpty || (showsSetup && !store.hidesReviewIdentities) {
                     ComposerCard(store: store)
                     ConfigurationCard(store: store)
                 } else {
@@ -19,6 +19,11 @@ struct NewRunView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.35))
+        .onChange(of: store.hidesReviewIdentities) { _, hidesIdentities in
+            if hidesIdentities {
+                showsSetup = false
+            }
+        }
     }
 }
 
@@ -34,6 +39,8 @@ private struct CompletedRunHeader: View {
                         .font(.headline)
                     Spacer()
                     Button("Edit setup", systemImage: "slider.horizontal.3") { editSetup() }
+                        .disabled(store.hidesReviewIdentities)
+                        .help(store.hidesReviewIdentities ? "Reveal identities before editing setup." : "Edit the prompt and agent setup for this run.")
                 }
                 Text(store.prompt)
                     .font(.title3)
@@ -44,13 +51,23 @@ private struct CompletedRunHeader: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    ForEach(store.configurations) { configuration in
-                        Text("\(configuration.harness == .fake ? "Demo" : configuration.harness.rawValue) · \(configuration.model) · \(configuration.reasoning ?? "Default")")
+                    if store.hidesReviewIdentities {
+                        Text("\(store.configurations.count) identities hidden")
                             .font(.caption)
-                            .lineLimit(1)
+                            .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 5)
                             .background(.quaternary.opacity(0.55), in: Capsule())
+                            .accessibilityLabel("\(store.configurations.count) identities hidden")
+                    } else {
+                        ForEach(store.configurations) { configuration in
+                            Text("\(configuration.harness == .fake ? "Demo" : configuration.harness.rawValue) · \(configuration.model) · \(configuration.reasoning ?? "Default")")
+                                .font(.caption)
+                                .lineLimit(1)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(.quaternary.opacity(0.55), in: Capsule())
+                        }
                     }
                 }
             }

@@ -37,6 +37,9 @@ final class JBenchAppStore: JBenchRunService {
     var lanes: [LanePresentation] = []
     var reviewMode: RunPresentation = .sideBySide
     var isRevealOn = false
+    var hidesReviewIdentities: Bool {
+        reviewMode == .blindReview && !isRevealOn
+    }
     var winningLaneID: UUID?
     var reviewNote = ""
     var history: [HistoryPresentation] = []
@@ -1242,7 +1245,9 @@ final class JBenchAppStore: JBenchRunService {
     private func notifyApproval(_ approval: ApprovalRequest, lane: Int) {
         let content = UNMutableNotificationContent()
         content.title = "JBench approval needed"
-        content.body = "Lane \(lane): \(approval.summary)"
+        content.body = hidesReviewIdentities
+            ? "A candidate needs permission to continue."
+            : "Lane \(lane): \(approval.summary)"
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "approval-\(approval.id.uuidString)", content: content, trigger: nil))
     }

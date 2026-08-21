@@ -339,6 +339,10 @@ private struct LaneCard: View {
             }
             .frame(minHeight: 184, alignment: .topLeading)
 
+            if !lane.judgeVotes.isEmpty {
+                JudgeVoteSummary(votes: lane.judgeVotes, candidate: lane.configuration, hidesIdentity: store.hidesReviewIdentities)
+            }
+
             if let worktree = lane.worktree {
                 WorktreeControls(store: store, lane: lane, worktree: worktree)
             }
@@ -411,6 +415,37 @@ private struct LaneCard: View {
                 .foregroundStyle(.secondary)
         }
         .menuStyle(.borderlessButton)
+    }
+}
+
+private struct JudgeVoteSummary: View {
+    let votes: [JudgeVote]
+    let candidate: AgentConfiguration
+    let hidesIdentity: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Judge votes", systemImage: "checkmark.seal")
+                    .font(.caption.bold())
+                Spacer()
+                Text("\(votes.count)").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(votes) { vote in
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: vote.errorMessage == nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(vote.errorMessage == nil ? .green : .orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(vote.judge.name) → \(hidesIdentity ? (vote.winningBlindLabel ?? "No winner") : "\(vote.winningBlindLabel ?? "No winner") · \(candidate.harness.rawValue) / \(candidate.model)")")
+                            .font(.caption.weight(.medium))
+                        Text(vote.errorMessage ?? vote.reasoning ?? "No reasoning supplied")
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

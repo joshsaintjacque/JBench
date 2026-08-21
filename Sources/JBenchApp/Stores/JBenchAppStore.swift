@@ -34,6 +34,10 @@ final class JBenchAppStore: JBenchRunService {
         .init(harness: .codex, model: "Not selected"),
         .init(harness: .codex, model: "Not selected")
     ]
+    var judgeConfigurations: [JudgeConfiguration] = []
+    var judgeVotes: [JudgeVote] = []
+    var isJudgingActive = false
+    var judgeStatusMessage: String?
     var lanes: [LanePresentation] = []
     var reviewMode: RunPresentation = .sideBySide
     var isRevealOn = false
@@ -88,9 +92,13 @@ final class JBenchAppStore: JBenchRunService {
     private let exportService = ExportService()
     private var discovery: DiscoveryService
     private var coordinator: RunCoordinator?
+    private var judgeEngine: JudgeEngine?
+    private var judgeTask: Task<Void, Never>?
+    private var judgeTaskToken: UUID?
     private var updateTask: Task<Void, Never>?
     private var activeRunID: UUID?
     private var activeRun: BenchmarkRun?
+    private var automaticJudgingRunIDs = Set<UUID>()
     private var historyRuns: [UUID: BenchmarkRun] = [:]
     private var worktreeRecords: [UUID: WorktreeRecord] = [:]
     private var worktreeDiffs: [UUID: String] = [:]
@@ -213,6 +221,71 @@ final class JBenchAppStore: JBenchRunService {
         configurationPolicy.reasoningValues(for: configuration, settings: discoverySettings)
     }
 
+    func reasoningValues(for judge: JudgeConfiguration) -> [String] {
+        reasoningValues(for: AgentConfiguration(harness: judge.harness, model: judge.model))
+    }
+
+    func addJudge() {
+        let harness: HarnessKind = isDemoMode ? .fake : .codex
+        let model = isDemoMode ? "Provider-free judge" : models(for: harness).first ?? "Not selected"
+        judgeConfigurations.append(.init(name: "Judge \(judgeConfigurations.count + 1)", harness: harness, model: model))
+        statusMessage = "Added judge \(judgeConfigurations.count)"
+    }
+
+    func removeJudge(_ id: UUID) { judgeConfigurations.removeAll { $0.id == id } }
+
+    func normalizeJudge(_ id: UUID) {
+        guard let index = judgeConfigurations.firstIndex(where: { $0.id == id }) else { return }
+        let judge = judgeConfigurations[index]
+        if judge.harness == .openCode { return }
+        let available = models(for: judge.harness)
+        if judge.harness != .fake, !available.contains(judge.model) {
+            judgeConfigurations[index].model = available.first ?? "Not selected"
+        }
+    }
+
+    var canRerunJudges: Bool {
+        guard let run = activeRun, run.endedAt != nil else { return false }
+        return !judgeConfigurations.isEmpty && run.agents.filter({ $0.state == .completed && !($0.attempts.last?.finalResponse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }).count >= 2
+    }
+
+    var judgeActionTitle: String { judgeVotes.isEmpty ? "Run Judges" : "Run Again" }
+
+    func judgeVoteDisplay(_ vote: JudgeVote) -> String {
+        let label = vote.winningBlindLabel ?? "No winner"
+        guard !hidesReviewIdentities,
+              let winningID = vote.winningAgentRunID,
+              let agent = activeRun?.agents.first(where: { $0.id == winningID }) else { return label }
+        return "\(label) · \(agent.requested.harness.rawValue) / \(agent.requested.model)"
+    }
+
+    func rerunJudges() {
+        guard canRerunJudges, var run = activeRun, let coordinator else {
+            statusMessage = "Judges need a completed run with at least two responses."
+            return
+        }
+        run.judgeConfigurations = judgeConfigurations
+        run.judgeVotes = []
+        activeRun = run
+        judgeVotes = []
+        lanes = presentation(for: run)
+        judgeTask?.cancel()
+        let token = UUID()
+        judgeTaskToken = token
+        judgeTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.clearJudgeTaskIfOwned(token) }
+            do {
+                let canonical = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: [])
+                guard !Task.isCancelled else { return }
+                await self.runJudges(for: canonical)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.judgeStatusMessage = "Could not save judge changes: \(self.actionable(error))"
+            }
+        }
+    }
+
     func addConfiguration() {
         guard configurations.count < 6 else { return }
         let harness: HarnessKind = isDemoMode ? .fake : .codex
@@ -273,7 +346,7 @@ final class JBenchAppStore: JBenchRunService {
                 .agy: "CLI stream-json protocol v1.1",
                 .fake: "provider-free fixture contract v1"
             ]
-            let draft = RunDraft(title: runTitle.nilIfEmpty, prompt: prompt, directoryPath: directory, repositoryState: snapshot.state, sourceCommit: sourceCommit, executionMode: mode, harnessVersions: versions, integrationProtocolVersions: protocols, configurations: configurations)
+            let draft = RunDraft(title: runTitle.nilIfEmpty, prompt: prompt, directoryPath: directory, repositoryState: snapshot.state, sourceCommit: sourceCommit, executionMode: mode, harnessVersions: versions, integrationProtocolVersions: protocols, configurations: configurations, judgeConfigurations: judgeConfigurations)
             statusMessage = isDemoMode ? "Running provider-free demo lanes" : "Starting \(configurations.count) local harness lanes"
             let run = try await coordinator.start(draft)
             activeRunID = run.id
@@ -424,6 +497,10 @@ final class JBenchAppStore: JBenchRunService {
             .init(harness: .fake, model: "Provider-free sample", reasoning: "Deterministic", timeoutSeconds: 30),
             .init(harness: .fake, model: "Provider-free alternate", reasoning: "Deterministic", timeoutSeconds: 30)
         ]
+        judgeConfigurations = [
+            .init(name: "Correctness", harness: .fake, model: "Provider-free judge", reasoning: "Deterministic", steeringPrompt: "Focus on correctness and choose the candidate with the most accurate response.")
+        ]
+        judgeVotes = []
         prompt = prompt.isEmpty ? "Summarize the operational risks in this change." : prompt
         statusMessage = "Demo mode uses no provider, account, or harness prompt."
     }
@@ -505,8 +582,14 @@ final class JBenchAppStore: JBenchRunService {
             return
         }
         activeRunID = nil
+        judgeTask?.cancel()
+        judgeTask = nil
+        judgeTaskToken = nil
+        isJudgingActive = false
         activeRun = nil
         lanes = []
+        judgeVotes = []
+        judgeStatusMessage = nil
         isRevealOn = false
         winningLaneID = nil
         reviewNote = ""
@@ -647,6 +730,8 @@ final class JBenchAppStore: JBenchRunService {
         repositorySnapshot = repository
         executionMode = forceReadOnly ? .readOnly : run.executionMode
         configurations = run.agents.sorted { $0.displayOrder < $1.displayOrder }.map(\.requested)
+        judgeConfigurations = run.judgeConfigurations
+        judgeVotes = run.judgeVotes
         isDemoMode = configurations.allSatisfy { $0.harness == .fake }
         section = .newRun
     }
@@ -856,6 +941,11 @@ final class JBenchAppStore: JBenchRunService {
 
     func shutdownForTermination() async -> String {
         updateTask?.cancel()
+        let task = judgeTask
+        task?.cancel()
+        judgeTask = nil
+        judgeTaskToken = nil
+        if let task { await task.value }
         guard let coordinator else {
             statusMessage = "Shutdown complete: no active local coordinator."
             return statusMessage
@@ -873,6 +963,7 @@ final class JBenchAppStore: JBenchRunService {
         let resolver = ExecutableResolver()
         var adapters: [any HarnessAdapter] = [FakeHarnessAdapter(plans: [
             "Provider-free sample": .successful(response: "Provider-free demo output. No local Codex or OpenCode prompt was run."),
+            "Provider-free judge": .successful(response: #"{"winner":"B","reason":"Deterministic demo judge selected Candidate B."}"#),
             "Provider-free alternate": .successful(response: "Second provider-free demo output for comparison. No account or provider was used.")
         ])]
         if let codex = resolver.resolve(harness: .codex, override: discoverySettings.executableOverrides[.codex]) {
@@ -886,6 +977,7 @@ final class JBenchAppStore: JBenchRunService {
             adapters.append(AgyAdapter(executablePath: agy.url.path))
         }
         coordinator = RunCoordinator(adapters: adapters, history: historyStore, evidence: evidenceStore, preparation: preparation ?? PassthroughAttemptPreparationService())
+        judgeEngine = JudgeEngine(adapters: adapters, evidence: evidenceStore)
         subscribeToUpdates()
     }
 
@@ -904,19 +996,21 @@ final class JBenchAppStore: JBenchRunService {
     private func receive(_ update: RunUpdate, coordinator: RunCoordinator) async {
         switch update {
         case .runCreated(let run):
-            activeRunID = run.id; activeRun = run; lanes = presentation(for: run)
+            activeRunID = run.id; activeRun = run; judgeVotes = run.judgeVotes; lanes = presentation(for: run)
         case .attemptChanged(let id, _, _):
             if let refreshed = try? await coordinator.run(id: id) {
                 reconcilePendingApprovals(for: refreshed)
                 await collectTerminalWorktreeChanges(for: refreshed)
                 guard activeRunID == id else { return }
                 activeRun = refreshed
+                judgeVotes = refreshed.judgeVotes
                 lanes = presentation(for: refreshed)
                 if refreshed.endedAt != nil { await finish(run: refreshed) }
             }
         case .runFinished(let run):
             guard activeRunID == run.id else { return }
             activeRun = run
+            judgeVotes = run.judgeVotes
             lanes = presentation(for: run)
             await finish(run: run)
         case .lifecycleChanged(let snapshot):
@@ -937,7 +1031,51 @@ final class JBenchAppStore: JBenchRunService {
         isBackgroundRunActive = false
         statusMessage = "\(run.agents.count) lanes \(run.state == .completed ? "completed" : "finished with \(run.state.rawValue)")"
         await loadHistory()
+        if !run.judgeConfigurations.isEmpty, automaticJudgingRunIDs.insert(run.id).inserted { await launchJudgeTask(for: run) }
         if notifyOnCompletion { notifyCompletion(for: run) }
+    }
+
+    private func runJudges(for run: BenchmarkRun) async {
+        guard let judgeEngine, let coordinator else { return }
+        guard activeRunID == run.id, !Task.isCancelled else { return }
+        isJudgingActive = true
+        judgeStatusMessage = "Judges are reviewing completed responses…"
+        defer {
+            if activeRunID == run.id { isJudgingActive = false }
+        }
+        do {
+            let votes = await judgeEngine.judge(run: run)
+            guard activeRunID == run.id, !Task.isCancelled else { return }
+            let judged = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: votes)
+            guard activeRunID == run.id, !Task.isCancelled else { return }
+            activeRun = judged
+            judgeVotes = judged.judgeVotes
+            lanes = presentation(for: judged)
+            historyRuns[judged.id] = judged
+            judgeStatusMessage = judged.judgeVotes.contains(where: { $0.errorMessage != nil }) ? "Some judges failed. Review each judge's result." : "All judges finished"
+            await loadHistory()
+        } catch {
+            if activeRunID == run.id, !Task.isCancelled { judgeStatusMessage = "Judging failed: \(actionable(error))" }
+        }
+    }
+
+    private func launchJudgeTask(for run: BenchmarkRun) async {
+        judgeTask?.cancel()
+        let token = UUID()
+        judgeTaskToken = token
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runJudges(for: run)
+        }
+        judgeTask = task
+        await task.value
+        clearJudgeTaskIfOwned(token)
+    }
+
+    private func clearJudgeTaskIfOwned(_ token: UUID) {
+        guard judgeTaskToken == token else { return }
+        judgeTask = nil
+        judgeTaskToken = nil
     }
 
     private func loadPersistedState() async {
@@ -969,7 +1107,7 @@ final class JBenchAppStore: JBenchRunService {
                 }
             }
         }
-        history = runs.map { run in HistoryPresentation(id: run.id, title: run.title, date: run.createdAt, state: run.state, directory: run.directoryPath, mode: run.executionMode, lanes: presentation(for: run), prompt: run.prompt) }
+        history = runs.map { run in HistoryPresentation(id: run.id, title: run.title, date: run.createdAt, state: run.state, directory: run.directoryPath, mode: run.executionMode, lanes: presentation(for: run), prompt: run.prompt, judgeConfigurations: run.judgeConfigurations, judgeVotes: run.judgeVotes) }
         if selectedHistoryID == nil { selectedHistoryID = history.first?.id }
         if section == .history {
             loadVerdictForSelectedHistory()
@@ -1034,7 +1172,8 @@ final class JBenchAppStore: JBenchRunService {
                 cost: costText(attempt?.metrics),
                 approval: attempt.flatMap { pendingApprovalsByAttemptID[$0.id] },
                 worktree: worktree.map { WorktreePresentation(path: $0.transferredPath ?? $0.ownedWorktreePath, changedFiles: $0.changedFileCount ?? 0, status: $0.disposition.rawValue, diff: worktreeDiffs[$0.id] ?? "") },
-                blindReviewOrder: agent.blindReviewOrder ?? agent.displayOrder
+                blindReviewOrder: agent.blindReviewOrder ?? agent.displayOrder,
+                judgeVotes: run.judgeVotes.filter { $0.winningAgentRunID == agent.id }
             )
         }
     }

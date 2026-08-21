@@ -16,6 +16,31 @@
 
 Final result: passed.
 
+## AI judges visual QA
+
+- Source: `/Users/joshs/workspace/JBench/mockups/judges-01-integrated-drawer.png`
+- Implementation: `/private/tmp/jbench-ai-judges-implementation.png`
+- Combined comparison: `/private/tmp/jbench-ai-judges-comparison.png`
+- Capture: app-owned SwiftUI snapshot at 1420 x 920 points (2840 x 1840 pixels); normalized to a 1536 x 1024 comparison canvas
+- State: two completed provider-free candidates and one named correctness judge with a deterministic vote and reason
+
+### Findings
+
+- Full view: passed. The selected direction's stacked right inspector, candidate cards, add/run controls, and inline vote summaries fit the existing JBench run surface.
+- Judge editor: passed. Name, harness, model, reasoning effort, and steering guidance remain visible and editable in one inspector.
+- Vote attribution: passed. The winning card and inspector show the judge name, blind label, revealed harness/model, and reason.
+- Existing design system: passed. The implementation uses JBench's native panel, control, spacing, and status styles instead of copying illustrative mockup chrome.
+- Expected differences: the provider-free proof uses two candidates and one judge; the concept uses three candidates and three judges. The feature supports arbitrary judge counts.
+
+### Iteration history
+
+1. The first capture proved the configuration layout but occurred before judging finished.
+2. Added a named provider-free demo judge and made snapshot mode wait for judge completion.
+3. The snapshot initialization path could still finish candidates before automatic judging started, so snapshot mode now triggers one explicit judge pass when needed.
+4. The final capture shows the vote and reasoning on both the winner card and the judge inspector.
+
+Final result: passed.
+
 ## Focus reader visual QA
 
 - Source: selected focus-reader ImageGen target from the implementation handoff; the user-local source path is intentionally omitted from this tracked record.

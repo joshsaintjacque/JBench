@@ -69,6 +69,7 @@ private struct SidebarView: View {
             Section {
                 Label(AppSection.newRun.title, systemImage: AppSection.newRun.systemImage)
                     .tag(AppSection.newRun)
+                    .onTapGesture { store.startNewRun() }
             }
 
             Section("RUNS") {
@@ -171,9 +172,9 @@ private struct SidebarView: View {
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Image(systemName: store.isBackgroundRunActive ? "bolt.fill" : "circle.fill")
-                    .foregroundStyle(store.isBackgroundRunActive ? .orange : .green)
+                    .foregroundStyle(store.isBackgroundRunActive ? .blue : .green)
                     .font(.caption)
-                Text(store.statusMessage)
+                Text(store.isBackgroundRunActive ? "\(store.activeRunCount) run\(store.activeRunCount == 1 ? "" : "s") active" : store.statusMessage)
                     .font(.caption)
                     .lineLimit(1)
                 Spacer()
@@ -236,7 +237,12 @@ private struct SidebarRunRow: View {
             HStack(spacing: 5) {
                 Text(URL(fileURLWithPath: item.directory).lastPathComponent)
                     .lineLimit(1)
-                Text("· \(item.lanes.count) agents")
+                let activeCount = item.lanes.count(where: { !$0.state.isTerminal })
+                if activeCount > 0 {
+                    Text("· \(activeCount) active · \(item.lanes.count) agents")
+                } else {
+                    Text("· \(item.lanes.count) agents")
+                }
                 if hasVerdict {
                     Image(systemName: "star.fill")
                         .foregroundStyle(isSelected ? .yellow : .orange)

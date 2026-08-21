@@ -60,7 +60,8 @@ final class JBenchAppStore: JBenchRunService {
     var notifyOnCompletion = false
     var diagnostics: [HarnessDiagnostic] = []
     var statusMessage = "Discovering local harnesses…"
-    var isBackgroundRunActive = false
+    var activeRunCount: Int { activeRunsByID.count }
+    var isBackgroundRunActive: Bool { activeRunCount > 0 }
     var worktreeMessage: String?
     var isDemoMode = false
     var discoverySettings: DiscoverySettings
@@ -93,12 +94,17 @@ final class JBenchAppStore: JBenchRunService {
     private var discovery: DiscoveryService
     private var coordinator: RunCoordinator?
     private var judgeEngine: JudgeEngine?
-    private var judgeTask: Task<Void, Never>?
-    private var judgeTaskToken: UUID?
+    private var manualJudgeTask: Task<Void, Never>?
+    private var manualJudgeTaskToken: UUID?
+    private var automaticJudgeTasks: [UUID: Task<Void, Never>] = [:]
+    private var automaticJudgeTaskTokens: [UUID: UUID] = [:]
+    private var activeJudgeTaskCount = 0
     private var updateTask: Task<Void, Never>?
     private var activeRunID: UUID?
     private var activeRun: BenchmarkRun?
+    private var activeRunsByID: [UUID: BenchmarkRun] = [:]
     private var automaticJudgingRunIDs = Set<UUID>()
+    private var finishedRunIDs = Set<UUID>()
     private var historyRuns: [UUID: BenchmarkRun] = [:]
     private var worktreeRecords: [UUID: WorktreeRecord] = [:]
     private var worktreeDiffs: [UUID: String] = [:]
@@ -199,14 +205,18 @@ final class JBenchAppStore: JBenchRunService {
         }
     }
     var menuBarIcon: String {
-        if lanes.contains(where: { $0.state == .waitingForApproval }) { return "hand.raised.circle.fill" }
+        if !pendingApprovalsByAttemptID.isEmpty { return "hand.raised.circle.fill" }
         if isBackgroundRunActive { return "bolt.circle.fill" }
         return "checkmark.circle"
     }
     var menuBarLabel: String {
-        if lanes.contains(where: { $0.state == .waitingForApproval }) { return "Approval needed" }
-        if isBackgroundRunActive { return "Lanes running" }
+        if !pendingApprovalsByAttemptID.isEmpty { return "Approval needed" }
+        if isBackgroundRunActive { return activeRunStatus }
         return "Idle"
+    }
+
+    private var activeRunStatus: String {
+        "\(activeRunCount) run\(activeRunCount == 1 ? "" : "s") active"
     }
 
     func catalog(for harness: HarnessKind) -> [ModelCatalogEntry] {
@@ -269,12 +279,12 @@ final class JBenchAppStore: JBenchRunService {
         activeRun = run
         judgeVotes = []
         lanes = presentation(for: run)
-        judgeTask?.cancel()
+        manualJudgeTask?.cancel()
         let token = UUID()
-        judgeTaskToken = token
-        judgeTask = Task { [weak self] in
+        manualJudgeTaskToken = token
+        manualJudgeTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.clearJudgeTaskIfOwned(token) }
+            defer { self.clearManualJudgeTaskIfOwned(token) }
             do {
                 let canonical = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: [])
                 guard !Task.isCancelled else { return }
@@ -349,10 +359,7 @@ final class JBenchAppStore: JBenchRunService {
             let draft = RunDraft(title: runTitle.nilIfEmpty, prompt: prompt, directoryPath: directory, repositoryState: snapshot.state, sourceCommit: sourceCommit, executionMode: mode, harnessVersions: versions, integrationProtocolVersions: protocols, configurations: configurations, judgeConfigurations: judgeConfigurations)
             statusMessage = isDemoMode ? "Running provider-free demo lanes" : "Starting \(configurations.count) local harness lanes"
             let run = try await coordinator.start(draft)
-            activeRunID = run.id
-            activeRun = run
-            lanes = presentation(for: run)
-            isBackgroundRunActive = true
+            track(run, select: true)
             section = .newRun
         } catch {
             statusMessage = actionable(error)
@@ -378,28 +385,28 @@ final class JBenchAppStore: JBenchRunService {
         let previousRun = activeRun
         let previousRunID = activeRunID
         let previousLanes = lanes
-        let wasBackgroundRunActive = isBackgroundRunActive
-        isBackgroundRunActive = true
         Task {
             do {
                 guard let refreshed = try await coordinator.run(id: run.id) else {
                     activeRun = previousRun
                     activeRunID = previousRunID
                     lanes = previousLanes
-                    isBackgroundRunActive = wasBackgroundRunActive
                     statusMessage = "Could not load this run for retry."
                     return
                 }
                 activeRunID = refreshed.id
                 activeRun = refreshed
                 lanes = presentation(for: refreshed)
+                finishedRunIDs.remove(run.id)
                 _ = try await coordinator.retry(failedAttemptID: attempt.id)
+                if let retrying = try await coordinator.run(id: refreshed.id) {
+                    track(retrying, select: true)
+                }
             }
             catch {
                 activeRun = previousRun
                 activeRunID = previousRunID
                 lanes = previousLanes
-                isBackgroundRunActive = wasBackgroundRunActive
                 statusMessage = actionable(error)
             }
         }
@@ -577,14 +584,11 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func startNewRun() {
-        guard !isBackgroundRunActive else {
-            statusMessage = "Wait for the active run to finish before starting a new run."
-            return
-        }
         activeRunID = nil
-        judgeTask?.cancel()
-        judgeTask = nil
-        judgeTaskToken = nil
+        // Automatic judges belong to completed runs and continue in their own tasks.
+        manualJudgeTask?.cancel()
+        manualJudgeTask = nil
+        manualJudgeTaskToken = nil
         isJudgingActive = false
         activeRun = nil
         lanes = []
@@ -594,6 +598,7 @@ final class JBenchAppStore: JBenchRunService {
         winningLaneID = nil
         reviewNote = ""
         section = .newRun
+        if activeRunCount > 0 { statusMessage = activeRunStatus }
     }
 
     func loadVerdictForSelectedHistory() {
@@ -606,6 +611,10 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     func prepareHistoryDeletion(_ runID: UUID) {
+        guard activeRunsByID[runID] == nil else {
+            statusMessage = "Active runs cannot be deleted until every lane finishes."
+            return
+        }
         Task {
             do {
                 guard let preview = try await historyStore?.deletionPreview(for: runID) else { statusMessage = "This history record no longer exists."; return }
@@ -633,6 +642,10 @@ final class JBenchAppStore: JBenchRunService {
             do {
                 let previews = try await historyStore?.deletionPreviews() ?? []
                 guard !previews.isEmpty else { statusMessage = "History is already empty."; return }
+                guard previews.allSatisfy({ activeRunsByID[$0.runID] == nil }) else {
+                    statusMessage = "Active runs cannot be deleted until every lane finishes."
+                    return
+                }
                 if let blocked = previews.first(where: { !$0.canDelete }) {
                     statusMessage = blocked.refusalReason ?? "Resolve pending worktrees before deleting history."
                     return
@@ -646,6 +659,11 @@ final class JBenchAppStore: JBenchRunService {
     func confirmDeleteAllHistory(deleteEvidence: Bool) {
         let ids = Set(deleteAllPreviews.map(\.runID))
         guard !ids.isEmpty else { return }
+        guard ids.allSatisfy({ activeRunsByID[$0] == nil }) else {
+            statusMessage = "Active runs cannot be deleted until every lane finishes."
+            deleteAllPreviews = []
+            return
+        }
         Task {
             do {
                 try await historyStore?.deleteAll(confirmation: .init(runIDs: ids, deleteEvidence: deleteEvidence), evidenceStore: evidenceStore)
@@ -660,6 +678,11 @@ final class JBenchAppStore: JBenchRunService {
 
     func confirmHistoryDeletion(deleteEvidence: Bool) {
         guard let preview = deletionPreview else { return }
+        guard activeRunsByID[preview.runID] == nil else {
+            statusMessage = "Active runs cannot be deleted until every lane finishes."
+            deletionPreview = nil
+            return
+        }
         Task {
             do {
                 try await historyStore?.deleteRun(id: preview.runID, confirmation: .init(runIDs: [preview.runID], deleteEvidence: deleteEvidence), evidenceStore: evidenceStore)
@@ -941,11 +964,13 @@ final class JBenchAppStore: JBenchRunService {
 
     func shutdownForTermination() async -> String {
         updateTask?.cancel()
-        let task = judgeTask
-        task?.cancel()
-        judgeTask = nil
-        judgeTaskToken = nil
-        if let task { await task.value }
+        let judgeTasks = ([manualJudgeTask] + Array(automaticJudgeTasks.values)).compactMap { $0 }
+        judgeTasks.forEach { $0.cancel() }
+        manualJudgeTask = nil
+        manualJudgeTaskToken = nil
+        automaticJudgeTasks.removeAll()
+        automaticJudgeTaskTokens.removeAll()
+        for task in judgeTasks { await task.value }
         guard let coordinator else {
             statusMessage = "Shutdown complete: no active local coordinator."
             return statusMessage
@@ -996,86 +1021,133 @@ final class JBenchAppStore: JBenchRunService {
     private func receive(_ update: RunUpdate, coordinator: RunCoordinator) async {
         switch update {
         case .runCreated(let run):
-            activeRunID = run.id; activeRun = run; judgeVotes = run.judgeVotes; lanes = presentation(for: run)
+            track(run, select: true)
         case .attemptChanged(let id, _, _):
             if let refreshed = try? await coordinator.run(id: id) {
                 reconcilePendingApprovals(for: refreshed)
                 await collectTerminalWorktreeChanges(for: refreshed)
-                guard activeRunID == id else { return }
-                activeRun = refreshed
-                judgeVotes = refreshed.judgeVotes
-                lanes = presentation(for: refreshed)
+                track(refreshed, select: activeRunID == id)
                 if refreshed.endedAt != nil { await finish(run: refreshed) }
             }
         case .runFinished(let run):
-            guard activeRunID == run.id else { return }
-            activeRun = run
-            judgeVotes = run.judgeVotes
-            lanes = presentation(for: run)
             await finish(run: run)
         case .lifecycleChanged(let snapshot):
             if let record = snapshot.metadata.worktree { worktreeRecords[record.id] = record; refreshActiveLanes() }
         case .approvalNeeded(let runID, let agentRunID, let attemptID, let approval):
-            guard runID == activeRunID, let index = lanes.firstIndex(where: { $0.id == agentRunID }) else { return }
             pendingApprovalsByAttemptID[attemptID] = approval
-            lanes[index].approval = approval
-            statusMessage = "Approval needed for lane \((lanes.firstIndex(where: { $0.id == agentRunID }) ?? 0) + 1)"
-            if notifyOnCompletion { notifyApproval(approval, lane: index + 1) }
+            if let run = activeRunsByID[runID] ?? historyRuns[runID] {
+                upsertHistory(run)
+            }
+            if runID == activeRunID, let index = lanes.firstIndex(where: { $0.id == agentRunID }) {
+                lanes[index].approval = approval
+                statusMessage = "Approval needed for lane \(index + 1)"
+            }
+            if notifyOnCompletion,
+               let lane = (activeRunsByID[runID] ?? historyRuns[runID])?.agents.firstIndex(where: { $0.id == agentRunID }) {
+                notifyApproval(approval, lane: lane + 1)
+            }
         case .diagnostic(let detail): statusMessage = detail
         }
     }
 
     private func finish(run: BenchmarkRun) async {
-        guard activeRunID == run.id else { return }
         await collectTerminalWorktreeChanges(for: run)
-        isBackgroundRunActive = false
-        statusMessage = "\(run.agents.count) lanes \(run.state == .completed ? "completed" : "finished with \(run.state.rawValue)")"
+        track(run, select: activeRunID == run.id)
+        let shouldNotify = finishedRunIDs.insert(run.id).inserted
+        statusMessage = activeRunCount > 0
+            ? activeRunStatus
+            : "\(run.agents.count) lanes \(run.state == .completed ? "completed" : "finished with \(run.state.rawValue)")"
         await loadHistory()
-        if !run.judgeConfigurations.isEmpty, automaticJudgingRunIDs.insert(run.id).inserted { await launchJudgeTask(for: run) }
-        if notifyOnCompletion { notifyCompletion(for: run) }
+        if !run.judgeConfigurations.isEmpty, automaticJudgingRunIDs.insert(run.id).inserted { launchJudgeTask(for: run) }
+        if shouldNotify, notifyOnCompletion { notifyCompletion(for: run) }
     }
 
     private func runJudges(for run: BenchmarkRun) async {
         guard let judgeEngine, let coordinator else { return }
-        guard activeRunID == run.id, !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
+        activeJudgeTaskCount += 1
         isJudgingActive = true
-        judgeStatusMessage = "Judges are reviewing completed responses…"
+        if activeRunID == run.id { judgeStatusMessage = "Judges are reviewing completed responses…" }
         defer {
-            if activeRunID == run.id { isJudgingActive = false }
+            activeJudgeTaskCount = max(0, activeJudgeTaskCount - 1)
+            isJudgingActive = activeJudgeTaskCount > 0
         }
         do {
             let votes = await judgeEngine.judge(run: run)
-            guard activeRunID == run.id, !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return }
             let judged = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: votes)
-            guard activeRunID == run.id, !Task.isCancelled else { return }
-            activeRun = judged
-            judgeVotes = judged.judgeVotes
-            lanes = presentation(for: judged)
-            historyRuns[judged.id] = judged
-            judgeStatusMessage = judged.judgeVotes.contains(where: { $0.errorMessage != nil }) ? "Some judges failed. Review each judge's result." : "All judges finished"
+            guard !Task.isCancelled else { return }
+            track(judged, select: activeRunID == judged.id)
+            if activeRunID == judged.id {
+                judgeStatusMessage = judged.judgeVotes.contains(where: { $0.errorMessage != nil }) ? "Some judges failed. Review each judge's result." : "All judges finished"
+            }
             await loadHistory()
         } catch {
             if activeRunID == run.id, !Task.isCancelled { judgeStatusMessage = "Judging failed: \(actionable(error))" }
         }
     }
 
-    private func launchJudgeTask(for run: BenchmarkRun) async {
-        judgeTask?.cancel()
+    private func launchJudgeTask(for run: BenchmarkRun) {
+        guard automaticJudgeTasks[run.id] == nil else { return }
         let token = UUID()
-        judgeTaskToken = token
-        let task = Task { [weak self] in
+        automaticJudgeTaskTokens[run.id] = token
+        automaticJudgeTasks[run.id] = Task { [weak self] in
             guard let self else { return }
             await self.runJudges(for: run)
+            self.clearAutomaticJudgeTask(runID: run.id, token: token)
         }
-        judgeTask = task
-        await task.value
-        clearJudgeTaskIfOwned(token)
     }
 
-    private func clearJudgeTaskIfOwned(_ token: UUID) {
-        guard judgeTaskToken == token else { return }
-        judgeTask = nil
-        judgeTaskToken = nil
+    private func clearAutomaticJudgeTask(runID: UUID, token: UUID) {
+        guard automaticJudgeTaskTokens[runID] == token else { return }
+        automaticJudgeTasks[runID] = nil
+        automaticJudgeTaskTokens[runID] = nil
+    }
+
+    private func clearManualJudgeTaskIfOwned(_ token: UUID) {
+        guard manualJudgeTaskToken == token else { return }
+        manualJudgeTask = nil
+        manualJudgeTaskToken = nil
+    }
+
+    private func track(_ run: BenchmarkRun, select: Bool) {
+        historyRuns[run.id] = run
+        if run.agents.contains(where: { !$0.state.isTerminal }) {
+            activeRunsByID[run.id] = run
+        } else {
+            activeRunsByID[run.id] = nil
+        }
+        upsertHistory(run)
+        if select {
+            activeRunID = run.id
+            activeRun = run
+            judgeVotes = run.judgeVotes
+            lanes = presentation(for: run)
+        }
+    }
+
+    private func upsertHistory(_ run: BenchmarkRun) {
+        let item = HistoryPresentation(
+            id: run.id,
+            title: run.title,
+            date: run.createdAt,
+            state: run.state,
+            directory: run.directoryPath,
+            mode: run.executionMode,
+            lanes: presentation(for: run),
+            prompt: run.prompt,
+            judgeConfigurations: run.judgeConfigurations,
+            judgeVotes: run.judgeVotes
+        )
+        if let index = history.firstIndex(where: { $0.id == run.id }) {
+            history[index] = item
+        } else {
+            history.append(item)
+        }
+        history.sort {
+            if $0.date != $1.date { return $0.date > $1.date }
+            return $0.id.uuidString > $1.id.uuidString
+        }
     }
 
     private func loadPersistedState() async {
@@ -1091,7 +1163,17 @@ final class JBenchAppStore: JBenchRunService {
     }
 
     private func populateHistory(from runs: [BenchmarkRun]) async {
-        historyRuns = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, $0) })
+        var mergedRuns = Dictionary(uniqueKeysWithValues: runs.map { ($0.id, $0) })
+        for (id, run) in activeRunsByID where mergedRuns[id] == nil { mergedRuns[id] = run }
+        historyRuns = mergedRuns
+        // The coordinator event stream is authoritative after launch. A history
+        // reload can race an in-flight event and must not resurrect a stale
+        // non-terminal snapshot that was already removed from activeRunsByID.
+        if activeRunsByID.isEmpty, activeRunID == nil, activeRun == nil {
+            for run in runs where !finishedRunIDs.contains(run.id) && run.agents.contains(where: { !$0.state.isTerminal }) {
+                activeRunsByID[run.id] = run
+            }
+        }
         for run in runs {
             if let verdict = try? await historyStore?.verdict(for: run.id) { verdicts[run.id] = verdict }
             if let records = try? await historyStore?.worktrees(for: run.id) {
@@ -1107,7 +1189,12 @@ final class JBenchAppStore: JBenchRunService {
                 }
             }
         }
-        history = runs.map { run in HistoryPresentation(id: run.id, title: run.title, date: run.createdAt, state: run.state, directory: run.directoryPath, mode: run.executionMode, lanes: presentation(for: run), prompt: run.prompt, judgeConfigurations: run.judgeConfigurations, judgeVotes: run.judgeVotes) }
+        history = mergedRuns.values.map { run in
+            HistoryPresentation(id: run.id, title: run.title, date: run.createdAt, state: run.state, directory: run.directoryPath, mode: run.executionMode, lanes: presentation(for: run), prompt: run.prompt, judgeConfigurations: run.judgeConfigurations, judgeVotes: run.judgeVotes)
+        }.sorted {
+            if $0.date != $1.date { return $0.date > $1.date }
+            return $0.id.uuidString > $1.id.uuidString
+        }
         if selectedHistoryID == nil { selectedHistoryID = history.first?.id }
         if section == .history {
             loadVerdictForSelectedHistory()
@@ -1204,7 +1291,10 @@ final class JBenchAppStore: JBenchRunService {
             guard let attempt = agent.attempts.last, attempt.state == .waitingForApproval else { return nil }
             return attempt.id
         })
-        pendingApprovalsByAttemptID = pendingApprovalsByAttemptID.filter { waitingAttemptIDs.contains($0.key) }
+        let runAttemptIDs = Set(run.agents.flatMap(\.attempts).map(\.id))
+        pendingApprovalsByAttemptID = pendingApprovalsByAttemptID.filter { attemptID, _ in
+            !runAttemptIDs.contains(attemptID) || waitingAttemptIDs.contains(attemptID)
+        }
     }
 
     private func reconcilePersistedNonterminalAttempts(in persistedRuns: [BenchmarkRun]) async -> [BenchmarkRun] {

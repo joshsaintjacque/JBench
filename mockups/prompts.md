@@ -1,6 +1,6 @@
 # JBench UI mockup prompts
 
-Generated with the built-in image generation tool on 2026-08-16.
+Generated with the built-in image generation tool. Concepts 1–3 were created on 2026-08-16; concept 4 was created on 2026-08-21.
 
 ## 1. Parallel Lanes
 
@@ -13,3 +13,7 @@ High-fidelity native macOS app named JBench. Use a dark node-based visual workbe
 ## 3. Review Desk
 
 High-fidelity native macOS app named JBench. Use an editorial review desk with warm parchment, dark navy ink, olive, orange, cobalt, and plum. Put the prompt and three agent rows in a left `RUN SHEET`; each row shows status, elapsed time, `Requested`, and `Observed`. Put three offset document sheets in a central `RESPONSE DECK`, with tabs for `SOL`, `LUNA`, and `DEEPSEEK`, readable numbered risks, and `Stack`, `Split`, and `Diff` modes. Put a `VERDICT` pane on the right with a score matrix for `Specificity`, `Evidence`, `Coverage`, and `Clarity`; a `DISAGREEMENTS` section; a `Best Overall` card; and `Pin`, `Export`, and `Open Raw Evidence`. Avoid node graphs, equal output columns, generic SaaS styling, and dark neon visuals.
+
+## 4. Concurrent Runs
+
+High-fidelity native macOS app named JBench. Use the bright `Parallel Lanes` visual language with warm white, graphite, blue, violet, and amber. In the `RUNS` sidebar, show `Architecture Risk Review` and `API Migration Review` immediately with healthy `Running` badges, animated activity indicators, active-agent counts, and start times. Show `Dependency Audit` as `Completed`. Keep `+ New Run` enabled, show `2 runs active` in the sidebar status area, and keep the main `New Run` form usable with three agent selectors and an enabled `Run 3 Agents` button. Add `Runs continue in the background.` Make it obvious that active runs remain selectable while another run can be launched. Running must never look like an error. Avoid dark mode, browser chrome, disabled controls, extra panels, and marketing-page styling.

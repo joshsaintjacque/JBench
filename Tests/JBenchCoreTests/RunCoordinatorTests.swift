@@ -64,6 +64,51 @@ struct RunCoordinatorTests {
         #expect(finished.agents[1].state == .completed)
     }
 
+    @Test func startsConcurrentRunsAndKeepsTheirSnapshotsIndependent() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "jbench-concurrent-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let history = try SQLiteHistoryStore(databaseURL: root.appending(path: "history.sqlite"))
+        let evidence = try EvidenceStore(rootDirectory: root.appending(path: "evidence", directoryHint: .isDirectory))
+        let fake = FakeHarnessAdapter(plans: [
+            "slow": .init(events: [.init(kind: .started), .init(kind: .activity, text: "still working"), .init(kind: .completed)], eventDelay: .milliseconds(80)),
+            "fast": .init(events: [.init(kind: .started), .init(kind: .completed)], eventDelay: .milliseconds(2))
+        ])
+        let coordinator = RunCoordinator(adapters: [fake], history: history, evidence: evidence)
+
+        let first = try await coordinator.start(.init(
+            prompt: "first run",
+            directoryPath: root.path,
+            repositoryState: .cleanGit,
+            executionMode: .readOnly,
+            configurations: [
+                .init(harness: .fake, model: "slow"),
+                .init(harness: .fake, model: "slow")
+            ]
+        ))
+        let second = try await coordinator.start(.init(
+            prompt: "second run",
+            directoryPath: root.path,
+            repositoryState: .cleanGit,
+            executionMode: .readOnly,
+            configurations: [
+                .init(harness: .fake, model: "fast"),
+                .init(harness: .fake, model: "fast")
+            ]
+        ))
+
+        let activeIDs = Set(await coordinator.activeRuns().map(\.id))
+        #expect(activeIDs.contains(first.id))
+        #expect(activeIDs.contains(second.id))
+
+        let finishedSecond = try await terminalRun(second.id, from: coordinator)
+        #expect(finishedSecond.prompt == "second run")
+        #expect(try await coordinator.run(id: first.id)?.agents.contains { !$0.state.isTerminal } == true)
+
+        let finishedFirst = try await terminalRun(first.id, from: coordinator)
+        #expect(finishedFirst.prompt == "first run")
+        #expect(finishedFirst.agents.allSatisfy { $0.state == .completed })
+    }
+
     @Test func judgeResultsUpdateTheCanonicalRunAndSurviveLaneRetry() async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "jbench-judge-cache-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }

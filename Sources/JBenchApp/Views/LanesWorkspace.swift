@@ -1509,7 +1509,6 @@ private struct BlindVerdictInspector: View {
                     Label("Start New Run", systemImage: "plus.circle")
                 }
                 .buttonStyle(.bordered)
-                .disabled(store.isBackgroundRunActive)
             }
 
             Button("Update verdict") { store.saveManualVerdict() }

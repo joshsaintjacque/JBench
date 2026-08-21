@@ -5,6 +5,10 @@ struct JudgesInspector: View {
     @Bindable var store: JBenchAppStore
     @State private var selectedJudgeID: UUID?
 
+    private var judgeEditingBlocked: Bool {
+        store.section != .newRun && (store.isJudgingActive || store.isBackgroundRunActive)
+    }
+
     private var selectedIndex: Int? {
         guard let selectedJudgeID else { return store.judgeConfigurations.indices.first }
         return store.judgeConfigurations.firstIndex { $0.id == selectedJudgeID } ?? store.judgeConfigurations.indices.first
@@ -20,7 +24,7 @@ struct JudgesInspector: View {
                     }
                     Spacer()
                     Button("Add Judge", systemImage: "plus") { store.addJudge(); selectedJudgeID = store.judgeConfigurations.last?.id }
-                        .disabled(store.isJudgingActive || store.isBackgroundRunActive)
+                        .disabled(judgeEditingBlocked)
                 }
                 if store.judgeConfigurations.isEmpty {
                     ContentUnavailableView("No judges configured", systemImage: "person.crop.circle.badge.questionmark", description: Text("Candidate results remain available without AI judges."))
@@ -152,6 +156,6 @@ private struct JudgeEditor: View {
                     .disabled(store.isJudgingActive || !store.canRerunJudges)
             }
         }
-        .disabled(store.isJudgingActive || store.isBackgroundRunActive)
+        .disabled(store.section != .newRun && (store.isJudgingActive || store.isBackgroundRunActive))
     }
 }

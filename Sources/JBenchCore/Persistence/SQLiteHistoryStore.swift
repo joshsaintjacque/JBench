@@ -118,6 +118,8 @@ public actor SQLiteHistoryStore {
             }
             try deleteObsoleteAttempts(for: run.id, keeping: currentAttemptIDs)
             for record in worktrees { try saveWorktreeRecord(record) }
+            try bindAndStep("DELETE FROM judge_votes WHERE run_id = ?", values: [.text(run.id.uuidString)])
+            for vote in run.judgeVotes { try upsertJudgeVote(vote) }
             try Self.execute(database, "COMMIT")
         } catch {
             _ = try? Self.execute(database, "ROLLBACK")
@@ -207,6 +209,8 @@ public actor SQLiteHistoryStore {
 
     public func saveVerdict(_ verdict: Verdict) throws { try upsert(table: "verdicts", id: verdict.id, blob: encoder.encode(verdict), updatedAt: verdict.recordedAt, additionalID: verdict.runID) }
     public func verdict(for runID: UUID) throws -> Verdict? { try queryBlobs("SELECT body FROM verdicts WHERE run_id = ? ORDER BY recorded_at DESC LIMIT 1", bindings: [.text(runID.uuidString)]).first.map { try decoder.decode(Verdict.self, from: $0) } }
+    public func saveJudgeVote(_ vote: JudgeVote) throws { try upsertJudgeVote(vote) }
+    public func judgeVotes(for runID: UUID) throws -> [JudgeVote] { try queryBlobs("SELECT body FROM judge_votes WHERE run_id = ? ORDER BY recorded_at ASC", bindings: [.text(runID.uuidString)]).map { try decoder.decode(JudgeVote.self, from: $0) } }
 
     private enum Binding { case text(String), integer(Int64), double(Double), blob(Data) }
     private static func date(from value: String) -> Date? {
@@ -284,8 +288,14 @@ public actor SQLiteHistoryStore {
         try execute(database, "CREATE INDEX IF NOT EXISTS attempts_run_harness_idx ON attempts(run_id, harness)")
         try execute(database, "CREATE TABLE IF NOT EXISTS verdicts(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, recorded_at REAL NOT NULL, body BLOB NOT NULL)")
         try execute(database, "CREATE INDEX IF NOT EXISTS verdicts_run_idx ON verdicts(run_id)")
+        try execute(database, "CREATE TABLE IF NOT EXISTS judge_votes(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, recorded_at REAL NOT NULL, body BLOB NOT NULL)")
+        try execute(database, "CREATE INDEX IF NOT EXISTS judge_votes_run_idx ON judge_votes(run_id)")
         try execute(database, "CREATE TABLE IF NOT EXISTS worktrees(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, disposition TEXT NOT NULL, body BLOB NOT NULL)")
         try execute(database, "CREATE INDEX IF NOT EXISTS worktrees_run_idx ON worktrees(run_id)")
         try execute(database, "INSERT OR IGNORE INTO migrations(version) VALUES(1)")
+    }
+
+    private func upsertJudgeVote(_ vote: JudgeVote) throws {
+        try bindAndStep("INSERT INTO judge_votes(id, run_id, recorded_at, body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id, recorded_at=excluded.recorded_at, body=excluded.body", values: [.text(vote.id.uuidString), .text(vote.runID.uuidString), .double(vote.recordedAt.timeIntervalSince1970), .blob(try encoder.encode(vote))])
     }
 }

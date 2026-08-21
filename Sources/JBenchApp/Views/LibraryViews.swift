@@ -160,10 +160,76 @@ private struct HistoryDetail: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(4)
                 }
+                if !item.judgeConfigurations.isEmpty {
+                    HistoryJudgeResults(configurations: item.judgeConfigurations, votes: item.judgeVotes, lanes: item.lanes, hidesIdentity: store.hidesReviewIdentities)
+                }
                 LanesWorkspace(store: store, lanes: item.lanes, runID: item.id)
             }
             .padding(20)
         }
+    }
+}
+
+private struct HistoryJudgeResults: View {
+    let configurations: [JudgeConfiguration]
+    let votes: [JudgeVote]
+    let lanes: [LanePresentation]
+    let hidesIdentity: Bool
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(configurations) { judge in
+                    judgeResult(judge)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Label("AI judge results", systemImage: "checkmark.seal")
+        }
+    }
+
+    @ViewBuilder
+    private func judgeResult(_ judge: JudgeConfiguration) -> some View {
+        let vote = votes.first(where: { $0.judge.id == judge.id })
+        let judgeDetails = [judge.harness.rawValue, judge.model, judge.reasoning ?? "Default"].joined(separator: " · ")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(judge.name.isEmpty ? "Unnamed judge" : judge.name, systemImage: "checkmark.seal")
+                    .font(.headline)
+                Spacer()
+                Text(judgeDetails)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let vote {
+                let detail = vote.errorMessage ?? vote.reasoning ?? "No reasoning supplied"
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Winner")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(vote.winningBlindLabel ?? "No winner")
+                        .font(.caption.weight(.medium))
+                    if !hidesIdentity,
+                       let winningAgentRunID = vote.winningAgentRunID,
+                       let candidate = lanes.first(where: { $0.id == winningAgentRunID }) {
+                        Text("· \(candidate.configuration.harness.rawValue) / \(candidate.configuration.model)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(vote.errorMessage == nil ? Color.secondary : Color.orange)
+                    .lineLimit(2)
+            } else {
+                Text("Awaiting result")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

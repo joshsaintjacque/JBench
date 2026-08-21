@@ -51,6 +51,36 @@ import Testing
     #expect(manifest.patches.count == 1)
 }
 
+@Test func exportsAIJudgesAndResolvesWinningCandidate() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("jbench-export-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let firstConfiguration = AgentConfiguration(harness: .codex, model: "candidate-one")
+    let secondConfiguration = AgentConfiguration(harness: .openCode, model: "candidate-two")
+    let firstID = UUID(); let secondID = UUID()
+    let first = AgentRun(id: firstID, runID: UUID(), displayOrder: 0, requested: firstConfiguration, attempts: [AgentAttempt(agentRunID: UUID(), number: 1, state: .completed, requested: firstConfiguration, finalResponse: "one")])
+    let second = AgentRun(id: secondID, runID: UUID(), displayOrder: 1, requested: secondConfiguration, attempts: [AgentAttempt(agentRunID: UUID(), number: 1, state: .completed, requested: secondConfiguration, finalResponse: "two")])
+    let successJudge = JudgeConfiguration(name: "Correctness", harness: .fake, model: "judge-model", reasoning: "high", steeringPrompt: "Focus on factual correctness.")
+    let failedJudge = JudgeConfiguration(name: "Taste", harness: .openCode, model: "taste-model", reasoning: "low")
+    let successVote = JudgeVote(runID: UUID(), judge: successJudge, winningAgentRunID: secondID, winningBlindLabel: "A", reasoning: "More accurate.", recordedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    let failedVote = JudgeVote(runID: UUID(), judge: failedJudge, errorMessage: "Judge timed out.", recordedAt: Date(timeIntervalSince1970: 1_700_000_001))
+    let run = try BenchmarkRun(prompt: "judge export", directoryPath: "/tmp/example", repositoryState: .nonGit, executionMode: .readOnly, rawEvidenceDirectory: root.path, agents: [first, second], judgeConfigurations: [successJudge, failedJudge], judgeVotes: [successVote, failedVote])
+
+    let report = try ExportService().exportMarkdownReport(run, to: root)
+    let markdown = try String(contentsOf: report, encoding: .utf8)
+    #expect(markdown.contains("## AI Judges"))
+    #expect(markdown.contains("### Correctness"))
+    #expect(markdown.contains("**Harness:** `fake`"))
+    #expect(markdown.contains("**Reasoning:** `high`"))
+    #expect(markdown.contains("Focus on factual correctness."))
+    #expect(markdown.contains("**Blind candidate:** `A`"))
+    #expect(markdown.contains("**Resolved candidate:** `openCode` / `candidate-two`"))
+    #expect(markdown.contains("**Reason:** More accurate."))
+    #expect(markdown.contains("**Error:** Judge timed out."))
+    #expect(markdown.contains("2023-11-14T22:13:20Z"))
+}
+
 @Test func exportedEvidenceReferencesResolveAfterMovingBundle() throws {
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("jbench-export-\(UUID().uuidString)", isDirectory: true)
@@ -76,6 +106,33 @@ import Testing
 
     #expect(fm.fileExists(atPath: resolvedFile.path))
     #expect(try Data(contentsOf: resolvedFile) == Data(#"{"event":"done"}"#.utf8))
+}
+
+@Test func exportsJudgeEvidenceIntoPortableBundle() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("jbench-export-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let evidence = root.appendingPathComponent("source-evidence", isDirectory: true)
+    try fm.createDirectory(at: evidence, withIntermediateDirectories: true)
+    let source = evidence.appendingPathComponent("judge.jsonl")
+    try Data(#"{"event":"judge-done"}"#.utf8).write(to: source)
+
+    let configuration = AgentConfiguration(harness: .fake, model: "candidate")
+    let first = AgentRun(runID: UUID(), displayOrder: 0, requested: configuration)
+    let second = AgentRun(runID: UUID(), displayOrder: 1, requested: configuration)
+    let judge = JudgeConfiguration(name: "Correctness", harness: .fake, model: "judge")
+    let vote = JudgeVote(runID: UUID(), judge: judge, errorMessage: "Judge failed", rawEvidenceFile: "judge.jsonl")
+    let run = try BenchmarkRun(prompt: "portable judge evidence", directoryPath: "/tmp/example", repositoryState: .nonGit, executionMode: .readOnly, rawEvidenceDirectory: evidence.path, agents: [first, second], judgeConfigurations: [judge], judgeVotes: [vote])
+
+    let bundle = try ExportService().exportEvidenceBundle(run, to: root)
+    let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+    let manifest = try decoder.decode(PortableEvidenceManifest.self, from: Data(contentsOf: bundle.manifestURL))
+    let exportedReference = try #require(manifest.run.judgeVotes.first?.rawEvidenceFile)
+    #expect(exportedReference != "judge.jsonl")
+    #expect(fm.fileExists(atPath: bundle.directory.appendingPathComponent("evidence").appendingPathComponent(exportedReference).path))
+    #expect(manifest.evidence.contains { $0.path == "evidence/\(exportedReference)" })
+    #expect(try Data(contentsOf: bundle.directory.appendingPathComponent("evidence").appendingPathComponent(exportedReference)) == Data(#"{"event":"judge-done"}"#.utf8))
 }
 
 @Test func rejectsEvidencePathEscape() throws {

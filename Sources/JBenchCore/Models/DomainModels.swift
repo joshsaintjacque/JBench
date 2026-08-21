@@ -64,6 +64,33 @@ public struct AgentConfiguration: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+public struct JudgeConfiguration: Codable, Sendable, Hashable, Identifiable {
+    public let id: UUID
+    public var name: String
+    public var harness: HarnessKind
+    public var model: String
+    public var reasoning: String?
+    public var steeringPrompt: String?
+    public init(id: UUID = UUID(), name: String, harness: HarnessKind, model: String, reasoning: String? = nil, steeringPrompt: String? = nil) {
+        self.id = id; self.name = name; self.harness = harness; self.model = model; self.reasoning = reasoning; self.steeringPrompt = steeringPrompt
+    }
+}
+
+public struct JudgeVote: Codable, Sendable, Hashable, Identifiable {
+    public let id: UUID
+    public var runID: UUID
+    public var judge: JudgeConfiguration
+    public var winningAgentRunID: UUID?
+    public var winningBlindLabel: String?
+    public var reasoning: String?
+    public var errorMessage: String?
+    public var rawEvidenceFile: String?
+    public var recordedAt: Date
+    public init(id: UUID = UUID(), runID: UUID, judge: JudgeConfiguration, winningAgentRunID: UUID? = nil, winningBlindLabel: String? = nil, reasoning: String? = nil, errorMessage: String? = nil, rawEvidenceFile: String? = nil, recordedAt: Date = .now) {
+        self.id = id; self.runID = runID; self.judge = judge; self.winningAgentRunID = winningAgentRunID; self.winningBlindLabel = winningBlindLabel; self.reasoning = reasoning; self.errorMessage = errorMessage; self.rawEvidenceFile = rawEvidenceFile; self.recordedAt = recordedAt
+    }
+}
+
 public struct Preset: Codable, Sendable, Hashable, Identifiable {
     public let id: UUID
     public var name: String
@@ -260,8 +287,15 @@ public struct BenchmarkRun: Codable, Sendable, Hashable, Identifiable {
     public var harnessVersions: [HarnessKind: String]
     public var integrationProtocolVersions: [HarnessKind: String]?
     public var agents: [AgentRun]
-    public init(id: UUID = UUID(), title: String? = nil, prompt: String, directoryPath: String, repositoryState: RepositoryState, sourceCommit: String? = nil, executionMode: ExecutionMode, createdAt: Date = .now, startedAt: Date? = nil, endedAt: Date? = nil, rawEvidenceDirectory: String, harnessVersions: [HarnessKind: String] = [:], integrationProtocolVersions: [HarnessKind: String]? = nil, agents: [AgentRun]) throws {
-        try Preset.validate(agents.map(\.requested)); self.id = id; self.title = title ?? Self.title(for: prompt); self.prompt = prompt; self.directoryPath = directoryPath; self.repositoryState = repositoryState; self.sourceCommit = sourceCommit; self.executionMode = executionMode; self.createdAt = createdAt; self.startedAt = startedAt; self.endedAt = endedAt; self.rawEvidenceDirectory = rawEvidenceDirectory; self.harnessVersions = harnessVersions; self.integrationProtocolVersions = integrationProtocolVersions; self.agents = agents
+    public var judgeConfigurations: [JudgeConfiguration]
+    public var judgeVotes: [JudgeVote]
+    public init(id: UUID = UUID(), title: String? = nil, prompt: String, directoryPath: String, repositoryState: RepositoryState, sourceCommit: String? = nil, executionMode: ExecutionMode, createdAt: Date = .now, startedAt: Date? = nil, endedAt: Date? = nil, rawEvidenceDirectory: String, harnessVersions: [HarnessKind: String] = [:], integrationProtocolVersions: [HarnessKind: String]? = nil, agents: [AgentRun], judgeConfigurations: [JudgeConfiguration] = [], judgeVotes: [JudgeVote] = []) throws {
+        try Preset.validate(agents.map(\.requested)); self.id = id; self.title = title ?? Self.title(for: prompt); self.prompt = prompt; self.directoryPath = directoryPath; self.repositoryState = repositoryState; self.sourceCommit = sourceCommit; self.executionMode = executionMode; self.createdAt = createdAt; self.startedAt = startedAt; self.endedAt = endedAt; self.rawEvidenceDirectory = rawEvidenceDirectory; self.harnessVersions = harnessVersions; self.integrationProtocolVersions = integrationProtocolVersions; self.agents = agents; self.judgeConfigurations = judgeConfigurations; self.judgeVotes = judgeVotes
+    }
+    private enum CodingKeys: String, CodingKey { case id, title, prompt, directoryPath, repositoryState, sourceCommit, executionMode, createdAt, startedAt, endedAt, rawEvidenceDirectory, harnessVersions, integrationProtocolVersions, agents, judgeConfigurations, judgeVotes }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(id: c.decode(UUID.self, forKey: .id), title: c.decodeIfPresent(String.self, forKey: .title), prompt: c.decode(String.self, forKey: .prompt), directoryPath: c.decode(String.self, forKey: .directoryPath), repositoryState: c.decode(RepositoryState.self, forKey: .repositoryState), sourceCommit: c.decodeIfPresent(String.self, forKey: .sourceCommit), executionMode: c.decode(ExecutionMode.self, forKey: .executionMode), createdAt: c.decode(Date.self, forKey: .createdAt), startedAt: c.decodeIfPresent(Date.self, forKey: .startedAt), endedAt: c.decodeIfPresent(Date.self, forKey: .endedAt), rawEvidenceDirectory: c.decode(String.self, forKey: .rawEvidenceDirectory), harnessVersions: c.decodeIfPresent([HarnessKind: String].self, forKey: .harnessVersions) ?? [:], integrationProtocolVersions: c.decodeIfPresent([HarnessKind: String].self, forKey: .integrationProtocolVersions), agents: c.decode([AgentRun].self, forKey: .agents), judgeConfigurations: c.decodeIfPresent([JudgeConfiguration].self, forKey: .judgeConfigurations) ?? [], judgeVotes: c.decodeIfPresent([JudgeVote].self, forKey: .judgeVotes) ?? [])
     }
     public var state: AggregateRunState {
         let states = agents.map(\.state)

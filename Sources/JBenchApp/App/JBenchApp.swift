@@ -35,8 +35,19 @@ final class JBenchAppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             store.loadProviderFreeDemo()
             store.start(prompt: store.prompt, directory: store.directory, mode: store.executionMode, configurations: store.configurations)
+            var requestedSnapshotJudging = false
             for _ in 0..<50 {
-                if !store.lanes.isEmpty && !store.isBackgroundRunActive { break }
+                let candidatesFinished = !store.lanes.isEmpty && !store.isBackgroundRunActive
+                if candidatesFinished,
+                   !store.judgeConfigurations.isEmpty,
+                   store.judgeVotes.isEmpty,
+                   !store.isJudgingActive,
+                   !requestedSnapshotJudging {
+                    requestedSnapshotJudging = true
+                    store.rerunJudges()
+                }
+                let judgingFinished = store.judgeConfigurations.isEmpty || (!store.isJudgingActive && !store.judgeVotes.isEmpty)
+                if candidatesFinished && judgingFinished { break }
                 try? await Task.sleep(for: .milliseconds(100))
             }
             window.contentView?.layoutSubtreeIfNeeded()

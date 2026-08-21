@@ -113,7 +113,7 @@ public extension HarnessAdapter {
     func shutdown(attemptID: UUID) async -> HarnessShutdownResult { await cancel(attemptID: attemptID); return .completed }
 }
 
-public struct RunDraft: Sendable, Hashable {
+public struct RunDraft: Codable, Sendable, Hashable {
     public var title: String?
     public var prompt: String
     public var directoryPath: String
@@ -123,9 +123,16 @@ public struct RunDraft: Sendable, Hashable {
     public var harnessVersions: [HarnessKind: String]
     public var integrationProtocolVersions: [HarnessKind: String]
     public var configurations: [AgentConfiguration]
-    public init(title: String? = nil, prompt: String, directoryPath: String, repositoryState: RepositoryState, sourceCommit: String? = nil, executionMode: ExecutionMode, harnessVersions: [HarnessKind: String] = [:], integrationProtocolVersions: [HarnessKind: String] = [:], configurations: [AgentConfiguration]) {
+    public var judgeConfigurations: [JudgeConfiguration]
+    public var judgeVotes: [JudgeVote]
+    public init(title: String? = nil, prompt: String, directoryPath: String, repositoryState: RepositoryState, sourceCommit: String? = nil, executionMode: ExecutionMode, harnessVersions: [HarnessKind: String] = [:], integrationProtocolVersions: [HarnessKind: String] = [:], configurations: [AgentConfiguration], judgeConfigurations: [JudgeConfiguration] = [], judgeVotes: [JudgeVote] = []) {
         self.title = title; self.prompt = prompt; self.directoryPath = directoryPath; self.repositoryState = repositoryState
-        self.sourceCommit = sourceCommit; self.executionMode = executionMode; self.harnessVersions = harnessVersions; self.integrationProtocolVersions = integrationProtocolVersions; self.configurations = configurations
+        self.sourceCommit = sourceCommit; self.executionMode = executionMode; self.harnessVersions = harnessVersions; self.integrationProtocolVersions = integrationProtocolVersions; self.configurations = configurations; self.judgeConfigurations = judgeConfigurations; self.judgeVotes = judgeVotes
+    }
+    private enum CodingKeys: String, CodingKey { case title, prompt, directoryPath, repositoryState, sourceCommit, executionMode, harnessVersions, integrationProtocolVersions, configurations, judgeConfigurations, judgeVotes }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(title: c.decodeIfPresent(String.self, forKey: .title), prompt: c.decode(String.self, forKey: .prompt), directoryPath: c.decode(String.self, forKey: .directoryPath), repositoryState: c.decode(RepositoryState.self, forKey: .repositoryState), sourceCommit: c.decodeIfPresent(String.self, forKey: .sourceCommit), executionMode: c.decode(ExecutionMode.self, forKey: .executionMode), harnessVersions: c.decodeIfPresent([HarnessKind: String].self, forKey: .harnessVersions) ?? [:], integrationProtocolVersions: c.decodeIfPresent([HarnessKind: String].self, forKey: .integrationProtocolVersions) ?? [:], configurations: c.decode([AgentConfiguration].self, forKey: .configurations), judgeConfigurations: c.decodeIfPresent([JudgeConfiguration].self, forKey: .judgeConfigurations) ?? [], judgeVotes: c.decodeIfPresent([JudgeVote].self, forKey: .judgeVotes) ?? [])
     }
 }
 
@@ -277,7 +284,7 @@ public actor RunCoordinator {
             return AgentRun(id: agentID, runID: runID, displayOrder: index, blindReviewOrder: blindOrders[index], requested: configuration, attempts: [AgentAttempt(agentRunID: agentID, number: 1, requested: configuration)])
         }
         let directory = try await evidence.makeRunDirectory(runID: runID)
-        var run = try BenchmarkRun(id: runID, title: draft.title, prompt: draft.prompt, directoryPath: draft.directoryPath, repositoryState: draft.repositoryState, sourceCommit: draft.sourceCommit, executionMode: draft.executionMode, startedAt: .now, rawEvidenceDirectory: directory.path, harnessVersions: draft.harnessVersions, integrationProtocolVersions: draft.integrationProtocolVersions, agents: agents)
+        var run = try BenchmarkRun(id: runID, title: draft.title, prompt: draft.prompt, directoryPath: draft.directoryPath, repositoryState: draft.repositoryState, sourceCommit: draft.sourceCommit, executionMode: draft.executionMode, startedAt: .now, rawEvidenceDirectory: directory.path, harnessVersions: draft.harnessVersions, integrationProtocolVersions: draft.integrationProtocolVersions, agents: agents, judgeConfigurations: draft.judgeConfigurations, judgeVotes: draft.judgeVotes)
 
         // Prepare every initial attempt before launching any server. This is what prevents
         // a failed editable worktree creation from producing a partially started comparison.

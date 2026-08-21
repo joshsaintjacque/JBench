@@ -56,6 +56,7 @@ struct LanePresentation: Identifiable, Hashable {
     var approval: ApprovalRequest?
     var worktree: WorktreePresentation?
     var blindReviewOrder: Int
+    var judgeVotes: [JudgeVote]
 
     init(
         id: UUID = UUID(),
@@ -70,7 +71,8 @@ struct LanePresentation: Identifiable, Hashable {
         cost: String = "Unavailable",
         approval: ApprovalRequest? = nil,
         worktree: WorktreePresentation? = nil,
-        blindReviewOrder: Int = 0
+        blindReviewOrder: Int = 0,
+        judgeVotes: [JudgeVote] = []
     ) {
         self.id = id
         self.configuration = configuration
@@ -85,6 +87,7 @@ struct LanePresentation: Identifiable, Hashable {
         self.approval = approval
         self.worktree = worktree
         self.blindReviewOrder = blindReviewOrder
+        self.judgeVotes = judgeVotes
     }
 }
 
@@ -104,6 +107,8 @@ struct HistoryPresentation: Identifiable, Hashable {
     var mode: ExecutionMode
     var lanes: [LanePresentation]
     var prompt: String
+    var judgeConfigurations: [JudgeConfiguration]
+    var judgeVotes: [JudgeVote]
 }
 
 struct HarnessDiagnostic: Identifiable, Hashable {

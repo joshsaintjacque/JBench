@@ -8,13 +8,26 @@ struct NewRunView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if store.lanes.isEmpty || (showsSetup && !store.hidesReviewIdentities) {
+                if store.lanes.isEmpty {
                     ComposerCard(store: store)
                     ConfigurationCard(store: store)
+                    JudgesInspector(store: store)
                 } else {
                     CompletedRunHeader(store: store) { showsSetup = true }
+                    if showsSetup && !store.hidesReviewIdentities {
+                        ComposerCard(store: store)
+                        ConfigurationCard(store: store)
+                    }
                 }
-                LanesWorkspace(store: store, lanes: store.lanes)
+                if !store.lanes.isEmpty {
+                    HStack(alignment: .top, spacing: 14) {
+                        LanesWorkspace(store: store, lanes: store.lanes)
+                        JudgesInspector(store: store)
+                            .frame(width: 330)
+                    }
+                } else {
+                    LanesWorkspace(store: store, lanes: store.lanes)
+                }
             }
             .padding(20)
         }

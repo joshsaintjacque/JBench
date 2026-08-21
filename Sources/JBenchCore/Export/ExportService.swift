@@ -61,6 +61,7 @@ public struct ExportService: Sendable {
         try FileManager.default.createDirectory(at: patchesDirectory, withIntermediateDirectories: false)
 
         var copiedEvidence: [ExportedFile] = []
+        var usedEvidenceNames = Set<String>()
         var portableRun = run
         portableRun.rawEvidenceDirectory = "evidence"
         for agentIndex in portableRun.agents.indices {
@@ -68,7 +69,7 @@ public struct ExportService: Sendable {
                 var attempt = portableRun.agents[agentIndex].attempts[attemptIndex]
                 guard let reference = attempt.rawEventFile, !reference.isEmpty else { continue }
                 let source = try resolveEvidence(reference, root: URL(fileURLWithPath: run.rawEvidenceDirectory, isDirectory: true))
-                let outputName = "\(attempt.id.uuidString).jsonl"
+                let outputName = uniqueEvidenceName(preferred: "\(attempt.id.uuidString).jsonl", usedNames: &usedEvidenceNames)
                 let relative = "evidence/\(outputName)"
                 let output = evidenceDirectory.appendingPathComponent(outputName)
                 try copyRegularFile(source, to: output)
@@ -76,6 +77,18 @@ public struct ExportService: Sendable {
                 attempt.rawEventFile = outputName
                 portableRun.agents[agentIndex].attempts[attemptIndex] = attempt
             }
+        }
+        for voteIndex in portableRun.judgeVotes.indices {
+            var vote = portableRun.judgeVotes[voteIndex]
+            guard let reference = vote.rawEvidenceFile, !reference.isEmpty else { continue }
+            let source = try resolveEvidence(reference, root: URL(fileURLWithPath: run.rawEvidenceDirectory, isDirectory: true))
+            let outputName = uniqueEvidenceName(preferred: "judge-\(vote.id.uuidString).jsonl", usedNames: &usedEvidenceNames)
+            let relative = "evidence/\(outputName)"
+            let output = evidenceDirectory.appendingPathComponent(outputName)
+            try copyRegularFile(source, to: output)
+            copiedEvidence.append(try fileRecord(relativePath: relative, at: output))
+            vote.rawEvidenceFile = outputName
+            portableRun.judgeVotes[voteIndex] = vote
         }
 
         var copiedPatches: [ExportedFile] = []
@@ -116,8 +129,52 @@ public struct ExportService: Sendable {
             if let error = attempt?.errorMessage { output += "- **Error:** \(error)\n" }
             output += "\n#### Response\n\n\(attempt?.finalResponse.isEmpty == false ? attempt!.finalResponse : "_(No response)_")\n\n"
         }
+        if !run.judgeConfigurations.isEmpty || !run.judgeVotes.isEmpty {
+            output += renderAIJudges(run)
+        }
         output += "## Verdict\n\n"
         if let verdict { output += "- **Winner:** `\(verdict.winningAgentRunID?.uuidString ?? "None")`\n- **Note:** \(verdict.note ?? "None")\n" } else { output += "No manual verdict recorded.\n" }
+        return output
+    }
+
+    private func renderAIJudges(_ run: BenchmarkRun) -> String {
+        var output = "## AI Judges\n\n"
+        if run.judgeConfigurations.isEmpty {
+            output += "No AI judges configured.\n\n"
+        } else {
+            for judge in run.judgeConfigurations {
+                output += "### \(judge.name)\n\n"
+                output += "- **Harness:** `\(judge.harness.rawValue)`\n- **Model:** `\(judge.model)`\n- **Reasoning:** `\(judge.reasoning ?? "Unavailable")`\n"
+                if let steering = judge.steeringPrompt, !steering.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    output += "- **Steering guidance:**\n\n```text\n\(steering.replacingOccurrences(of: "```", with: "``\\u{200B}`"))\n```\n"
+                } else {
+                    output += "- **Steering guidance:** None\n"
+                }
+                output += "\n"
+            }
+        }
+
+        if run.judgeVotes.isEmpty {
+            output += "No AI judge votes recorded.\n\n"
+            return output
+        }
+
+        output += "### Votes\n\n"
+        for vote in run.judgeVotes {
+            output += "#### \(vote.judge.name)\n\n"
+            if let error = vote.errorMessage, !error.isEmpty {
+                output += "- **Error:** \(error)\n- **Timestamp:** \(date(vote.recordedAt))\n\n"
+                continue
+            }
+            let actualCandidate = vote.winningAgentRunID.flatMap { id in run.agents.first(where: { $0.id == id }) }
+            let candidateDescription: String
+            if let actualCandidate {
+                candidateDescription = "`\(actualCandidate.requested.harness.rawValue)` / `\(actualCandidate.requested.model)`"
+            } else {
+                candidateDescription = "Unavailable"
+            }
+            output += "- **Blind candidate:** `\(vote.winningBlindLabel ?? "Unavailable")`\n- **Resolved candidate:** \(candidateDescription)\n- **Reason:** \(vote.reasoning ?? "Unavailable")\n- **Timestamp:** \(date(vote.recordedAt))\n\n"
+        }
         return output
     }
 
@@ -163,5 +220,14 @@ public struct ExportService: Sendable {
     }
     private func fileRecord(relativePath: String, at url: URL) throws -> ExportedFile {
         let data = try Data(contentsOf: url); return ExportedFile(path: relativePath, sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), byteCount: data.count)
+    }
+    private func uniqueEvidenceName(preferred: String, usedNames: inout Set<String>) -> String {
+        guard usedNames.contains(preferred) else { usedNames.insert(preferred); return preferred }
+        let base = String(preferred.dropLast(".jsonl".count))
+        var suffix = 2
+        while usedNames.contains("\(base)-\(suffix).jsonl") { suffix += 1 }
+        let name = "\(base)-\(suffix).jsonl"
+        usedNames.insert(name)
+        return name
     }
 }

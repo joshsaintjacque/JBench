@@ -94,8 +94,8 @@ final class JBenchAppStore: JBenchRunService {
     private var discovery: DiscoveryService
     private var coordinator: RunCoordinator?
     private var judgeEngine: JudgeEngine?
-    private var judgeTask: Task<Void, Never>?
-    private var judgeTaskToken: UUID?
+    private var manualJudgeTask: Task<Void, Never>?
+    private var manualJudgeTaskToken: UUID?
     private var automaticJudgeTasks: [UUID: Task<Void, Never>] = [:]
     private var automaticJudgeTaskTokens: [UUID: UUID] = [:]
     private var activeJudgeTaskCount = 0
@@ -279,12 +279,12 @@ final class JBenchAppStore: JBenchRunService {
         activeRun = run
         judgeVotes = []
         lanes = presentation(for: run)
-        judgeTask?.cancel()
+        manualJudgeTask?.cancel()
         let token = UUID()
-        judgeTaskToken = token
-        judgeTask = Task { [weak self] in
+        manualJudgeTaskToken = token
+        manualJudgeTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.clearJudgeTaskIfOwned(token) }
+            defer { self.clearManualJudgeTaskIfOwned(token) }
             do {
                 let canonical = try await coordinator.updateJudgeResults(runID: run.id, configurations: run.judgeConfigurations, votes: [])
                 guard !Task.isCancelled else { return }
@@ -585,9 +585,10 @@ final class JBenchAppStore: JBenchRunService {
 
     func startNewRun() {
         activeRunID = nil
-        judgeTask?.cancel()
-        judgeTask = nil
-        judgeTaskToken = nil
+        // Automatic judges belong to completed runs and continue in their own tasks.
+        manualJudgeTask?.cancel()
+        manualJudgeTask = nil
+        manualJudgeTaskToken = nil
         isJudgingActive = false
         activeRun = nil
         lanes = []
@@ -963,10 +964,10 @@ final class JBenchAppStore: JBenchRunService {
 
     func shutdownForTermination() async -> String {
         updateTask?.cancel()
-        let judgeTasks = ([judgeTask] + Array(automaticJudgeTasks.values)).compactMap { $0 }
+        let judgeTasks = ([manualJudgeTask] + Array(automaticJudgeTasks.values)).compactMap { $0 }
         judgeTasks.forEach { $0.cancel() }
-        judgeTask = nil
-        judgeTaskToken = nil
+        manualJudgeTask = nil
+        manualJudgeTaskToken = nil
         automaticJudgeTasks.removeAll()
         automaticJudgeTaskTokens.removeAll()
         for task in judgeTasks { await task.value }
@@ -1097,10 +1098,10 @@ final class JBenchAppStore: JBenchRunService {
         automaticJudgeTaskTokens[runID] = nil
     }
 
-    private func clearJudgeTaskIfOwned(_ token: UUID) {
-        guard judgeTaskToken == token else { return }
-        judgeTask = nil
-        judgeTaskToken = nil
+    private func clearManualJudgeTaskIfOwned(_ token: UUID) {
+        guard manualJudgeTaskToken == token else { return }
+        manualJudgeTask = nil
+        manualJudgeTaskToken = nil
     }
 
     private func track(_ run: BenchmarkRun, select: Bool) {

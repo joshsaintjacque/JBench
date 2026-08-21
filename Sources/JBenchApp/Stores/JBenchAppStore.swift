@@ -1035,6 +1035,9 @@ final class JBenchAppStore: JBenchRunService {
             if let record = snapshot.metadata.worktree { worktreeRecords[record.id] = record; refreshActiveLanes() }
         case .approvalNeeded(let runID, let agentRunID, let attemptID, let approval):
             pendingApprovalsByAttemptID[attemptID] = approval
+            if let run = activeRunsByID[runID] ?? historyRuns[runID] {
+                upsertHistory(run)
+            }
             if runID == activeRunID, let index = lanes.firstIndex(where: { $0.id == agentRunID }) {
                 lanes[index].approval = approval
                 statusMessage = "Approval needed for lane \(index + 1)"

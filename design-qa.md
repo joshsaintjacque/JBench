@@ -16,6 +16,25 @@
 
 Final result: passed.
 
+## Unified runs sidebar visual QA
+
+- Source: selected single-sidebar ImageGen target at `/Users/joshs/.codex/generated_images/01a022ad-e9c0-7363-910a-eb86b16c26e3/exec-141d3860-573e-406b-b9b3-c15db72dc5ce.png`
+- Implementation: `/var/folders/dq/wx6_9dqd07d37crmxwphylb00000gn/T/codex-shot-2026-08-20_22-28-17.png`
+- Combined comparison: `/private/tmp/jbench-single-sidebar-comparison.png`
+- Capture: inspected full JBench app-window screenshot in light mode; proof media remains outside the product branch.
+- State: provider-free local run data plus existing persisted history; no external model prompt ran for the capture.
+
+### Findings
+
+- Structure: passed. The separate History list column is gone. One widened app sidebar contains New Run, Runs, Presets, Settings, and the bottom status message, with one divider into the selected run detail.
+- Search and selection: passed. The visible Search runs field, clear action, compact run metadata, blue selected state, and run-to-detail navigation remain available in the unified sidebar.
+- Filters: passed. Directory, model, harness, verdict, date range, and Delete All History remain available in the sidebar disclosure.
+- Detail width: passed. The run evidence and review workspace begin immediately beside the app sidebar and use the reclaimed width.
+- Existing design system: passed. The implementation uses native SwiftUI list, field, disclosure, badge, button, and selection treatments instead of rebranding JBench.
+- Expected differences: the proof capture uses current provider-free fixture data and two lane cards; the selected concept used an existing six-agent run. These data differences do not change the approved sidebar hierarchy.
+
+Final result: passed.
+
 ## AI judges visual QA
 
 - Source: `/Users/joshs/workspace/JBench/mockups/judges-01-integrated-drawer.png`

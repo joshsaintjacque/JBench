@@ -123,11 +123,19 @@ struct OpenCodeAdapterTests {
         #expect(defaultBody["variant"] == nil)
     }
 
-    @Test func authStateOnlyClaimsWhatTheServerReports() {
-        #expect(OpenCodeWireParser.authenticationStatus(from: "{\"status\":\"connected\"}", statusCode: 200) == .ready)
-        #expect(OpenCodeWireParser.authenticationStatus(from: "{\"status\":\"disconnected\"}", statusCode: 200) == .missing)
-        #expect(OpenCodeWireParser.authenticationStatus(from: "{}", statusCode: 200) == .unknown)
-        #expect(OpenCodeWireParser.authenticationStatus(from: "{}", statusCode: 401) == .missing)
+    @Test func parsesOpenCode11821VersionCommandOutput() {
+        #expect(OpenCodeWireParser.version(fromCommandOutput: "1.18.21\n") == "1.18.21")
+        #expect(OpenCodeWireParser.version(fromCommandOutput: "  1.18.21  \n") == "1.18.21")
+        #expect(OpenCodeWireParser.version(fromCommandOutput: "\n") == nil)
+    }
+
+    @Test func authStateUsesOpenCodeProviderConnectedArray() {
+        #expect(OpenCodeWireParser.authenticationStatus(fromProviderResponse: "{\"connected\":[\"openai\"]}", statusCode: 200) == .ready)
+        #expect(OpenCodeWireParser.authenticationStatus(fromProviderResponse: "{\"connected\":[]}", statusCode: 200) == .missing)
+        #expect(OpenCodeWireParser.authenticationStatus(fromProviderResponse: "{}", statusCode: 200) == .unknown)
+        #expect(OpenCodeWireParser.authenticationStatus(fromProviderResponse: "{\"connected\":\"openai\"}", statusCode: 200) == .unknown)
+        #expect(OpenCodeWireParser.authenticationStatus(fromProviderResponse: "{\"connected\":[42]}", statusCode: 200) == .unknown)
+        #expect(OpenCodeWireParser.authenticationStatus(fromProviderResponse: "{}", statusCode: 401) == .missing)
     }
 
     @Test func readOnlyCapabilityRequiresACompositionVerifiedSentinel() async {

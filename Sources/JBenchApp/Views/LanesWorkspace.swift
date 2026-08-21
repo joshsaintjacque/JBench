@@ -6,6 +6,14 @@ struct LanesWorkspace: View {
     @Bindable var store: JBenchAppStore
     let lanes: [LanePresentation]
     var runID: UUID? = nil
+    var judgeVotes: [JudgeVote]? = nil
+    var judgeConfigurations: [JudgeConfiguration]? = nil
+
+    private var displayedJudgeVotes: [JudgeVote] { judgeVotes ?? store.judgeVotes }
+    private var displayedJudgeConfigurations: [JudgeConfiguration] { judgeConfigurations ?? store.judgeConfigurations }
+    private var judgeVoteLedger: JudgeVoteLedger {
+        .init(votes: displayedJudgeVotes, lanes: lanes, configuredJudges: displayedJudgeConfigurations)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -21,6 +29,7 @@ struct LanesWorkspace: View {
 
                 overallStatusView
                 winnerSummaryView
+                judgeResultSummaryView
 
                 Spacer()
                 Menu("Export", systemImage: "square.and.arrow.up") {
@@ -34,14 +43,14 @@ struct LanesWorkspace: View {
                 ScrollView(.horizontal) {
                     HStack(alignment: .top, spacing: 14) {
                         ForEach(lanes) { lane in
-                            LaneCard(store: store, lane: lane)
+                            LaneCard(store: store, lane: lane, allJudgeVotes: displayedJudgeVotes)
                                 .frame(width: 380)
                         }
                     }
                     .padding(.vertical, 2)
                 }
             } else {
-                BlindReviewView(store: store, lanes: lanes)
+                BlindReviewView(store: store, lanes: lanes, judgeVotes: displayedJudgeVotes)
                     .frame(minHeight: 620)
             }
         }
@@ -222,6 +231,21 @@ struct LanesWorkspace: View {
         }
     }
 
+    @ViewBuilder
+    private var judgeResultSummaryView: some View {
+        if let summary = judgeVoteLedger.summary {
+            Label(summary, systemImage: "checkmark.seal")
+                .font(.caption.bold())
+                .foregroundStyle(.blue)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.blue.opacity(0.1), in: Capsule())
+                .overlay { Capsule().strokeBorder(Color.blue.opacity(0.25), lineWidth: 0.5) }
+                .accessibilityLabel("Judge result")
+                .accessibilityValue(summary)
+        }
+    }
+
     private func neutralVerdictBadge(title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
             .font(.caption.bold())
@@ -261,6 +285,7 @@ struct LanesWorkspace: View {
 private struct LaneCard: View {
     @Bindable var store: JBenchAppStore
     let lane: LanePresentation
+    let allJudgeVotes: [JudgeVote]
 
     private var tint: Color {
         switch lane.configuration.harness {
@@ -292,6 +317,9 @@ private struct LaneCard: View {
                         if isWinner {
                             WinnerBadge(label: isPersistedWinner ? "Winner" : "Selected")
                         }
+                    }
+                    if !allJudgeVotes.isEmpty {
+                        JudgeVoteBadge(votes: lane.judgeVotes, allVotes: allJudgeVotes)
                     }
                     Label(lane.activity, systemImage: stateIcon)
                         .font(.caption)
@@ -449,6 +477,112 @@ private struct JudgeVoteSummary: View {
     }
 }
 
+private struct JudgeVoteBadge: View {
+    let votes: [JudgeVote]
+    let allVotes: [JudgeVote]
+
+    private var castVotes: [JudgeVote] {
+        votes.filter {
+            $0.errorMessage == nil
+                && $0.winningAgentRunID != nil
+                && !($0.winningBlindLabel?.isEmpty ?? true)
+        }
+    }
+
+    private var badgeTint: Color { castVotes.isEmpty ? .secondary : .blue }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("\(castVotes.count) \(castVotes.count == 1 ? "vote" : "votes")")
+                .font(.caption2.bold())
+            if !castVotes.isEmpty {
+                HStack(spacing: 2) {
+                    ForEach(castVotes) { vote in
+                        Text(judgeMarker(for: vote))
+                            .font(.caption2.weight(.semibold).monospaced())
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+        }
+        .foregroundStyle(badgeTint)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(badgeTint.opacity(0.09), in: Capsule())
+        .overlay { Capsule().strokeBorder(badgeTint.opacity(0.24), lineWidth: 0.5) }
+        .accessibilityLabel("Judge votes")
+        .accessibilityValue(judgeVoteAccessibilityValue(castVotes))
+    }
+
+    private func judgeMarker(for vote: JudgeVote) -> String {
+        let name = normalizedJudgeName(vote.judge.name)
+        let base = judgeInitials(name)
+        let matching = allVotes.filter { normalizedJudgeName($0.judge.name) == name }
+        guard matching.count > 1, let index = matching.firstIndex(where: { $0.id == vote.id }) else { return base }
+        return "\(base)\(index + 1)"
+    }
+}
+
+private struct JudgeVoteLedger {
+    let votes: [JudgeVote]
+    let lanes: [LanePresentation]
+    let configuredJudges: [JudgeConfiguration]
+
+    private var candidateLabels: [String] {
+        lanes.sorted(by: Self.laneOrder).indices.map { Self.candidateLabel(for: $0) }
+    }
+
+    var summary: String? {
+        JudgeVoteResultSummary.text(
+            votes: votes,
+            candidateLabels: candidateLabels,
+            configuredJudges: configuredJudges,
+            validCandidateIDs: Set(lanes.map(\.id))
+        )
+    }
+
+    private static func laneOrder(_ lhs: LanePresentation, _ rhs: LanePresentation) -> Bool {
+        if lhs.blindReviewOrder != rhs.blindReviewOrder { return lhs.blindReviewOrder < rhs.blindReviewOrder }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func candidateLabel(for index: Int) -> String {
+        var value = index
+        var result = ""
+        repeat {
+            result = String(UnicodeScalar(65 + value % 26)!) + result
+            value = value / 26 - 1
+        } while value >= 0
+        return result
+    }
+
+}
+
+private func normalizedJudgeName(_ name: String) -> String {
+    let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return normalized.isEmpty ? "Unnamed judge" : normalized
+}
+
+private func judgeInitials(_ name: String) -> String {
+    let words = name.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
+    if let first = words.first, let firstScalar = first.first {
+        if words.count > 1, let lastScalar = words.last?.first {
+            return String(firstScalar).uppercased() + String(lastScalar).uppercased()
+        }
+        let firstTwo = String(first.prefix(2))
+        return firstTwo.uppercased()
+    }
+    return "J"
+}
+
+private func judgeVoteAccessibilityValue(_ votes: [JudgeVote]) -> String {
+    guard !votes.isEmpty else { return "0 judge votes" }
+    let details = votes.map { vote in
+        "\(normalizedJudgeName(vote.judge.name)) voted \(vote.winningBlindLabel ?? "a candidate")"
+    }
+    return "\(votes.count) \(votes.count == 1 ? "judge vote" : "judge votes"): \(details.joined(separator: "; "))"
+}
+
 private struct SettingsColumn: View {
     let title: String
     let values: [(String, String)]
@@ -533,6 +667,7 @@ private struct WorktreeControls: View {
 private struct BlindReviewView: View {
     @Bindable var store: JBenchAppStore
     let lanes: [LanePresentation]
+    let judgeVotes: [JudgeVote]
     @State private var activeLaneID: UUID?
     @State private var pinnedLaneID: UUID?
     @State private var selectedSectionID: String?
@@ -710,19 +845,24 @@ private struct BlindReviewView: View {
                     Button {
                         selectLane(lane.id)
                     } label: {
-                        HStack(spacing: 8) {
-                            Text(candidateTitle(for: lane, index: index))
-                                .font(.subheadline.weight(.medium))
-                                .lineLimit(1)
-                            if pinnedLaneID == lane.id {
-                                Image(systemName: "pin.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tint)
-                                    .accessibilityLabel("Pinned for comparison")
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 8) {
+                                Text(candidateTitle(for: lane, index: index))
+                                    .font(.subheadline.weight(.medium))
+                                    .lineLimit(1)
+                                if pinnedLaneID == lane.id {
+                                    Image(systemName: "pin.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tint)
+                                        .accessibilityLabel("Pinned for comparison")
+                                }
+                                LaneStatusBadge(state: lane.state)
+                                if isWinner {
+                                    WinnerBadge(label: isPersistedWinner ? "Winner" : "Selected")
+                                }
                             }
-                            LaneStatusBadge(state: lane.state)
-                            if isWinner {
-                                WinnerBadge(label: isPersistedWinner ? "Winner" : "Selected")
+                            if !judgeVotes.isEmpty {
+                                JudgeVoteBadge(votes: lane.judgeVotes, allVotes: judgeVotes)
                             }
                         }
                         .padding(.horizontal, 11)
@@ -748,6 +888,7 @@ private struct BlindReviewView: View {
                         lane.state.rawValue
                             + (isPersistedWinner ? ", winner" : isDraftSelection ? ", selected candidate" : "")
                             + (pinnedLaneID == lane.id ? ", pinned for comparison" : "")
+                            + (!judgeVotes.isEmpty ? ", \(judgeVoteAccessibilityValue(lane.judgeVotes))" : "")
                     )
                 }
 

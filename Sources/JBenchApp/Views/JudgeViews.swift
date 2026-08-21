@@ -62,14 +62,30 @@ struct JudgesInspector: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(store.judgeConfigurations) { judge in
-                    if let vote = store.judgeVotes.first(where: { $0.judge.id == judge.id }) {
-                        HStack(alignment: .top, spacing: 7) {
-                            Image(systemName: vote.errorMessage == nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .foregroundStyle(vote.errorMessage == nil ? .green : .orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("\(vote.judge.name): \(store.judgeVoteDisplay(vote))").font(.caption.weight(.medium))
-                                Text(vote.errorMessage ?? vote.reasoning ?? "No reasoning supplied").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                            }
+                    let vote = store.judgeVotes.first(where: { $0.judge.id == judge.id })
+                    let hasVote = vote?.errorMessage == nil
+                        && vote?.winningAgentRunID != nil
+                        && !(vote?.winningBlindLabel?.isEmpty ?? true)
+                    HStack(alignment: .top, spacing: 7) {
+                        Image(systemName: hasVote ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(hasVote ? .green : .orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(judge.name.isEmpty ? "Unnamed judge" : judge.name)
+                                .font(.caption.weight(.medium))
+                            Text(vote?.errorMessage ?? vote?.reasoning ?? "No result recorded")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer(minLength: 8)
+                        if hasVote, let label = vote?.winningBlindLabel {
+                            Text("Voted \(label)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.green)
+                        } else {
+                            Text("No vote")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }

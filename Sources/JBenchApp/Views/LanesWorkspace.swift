@@ -420,6 +420,7 @@ private struct BlindReviewView: View {
     @State private var pinnedLaneID: UUID?
     @State private var selectedSectionID: String?
     @State private var scrollTargetID: String?
+    @State private var parsedOutputs: [UUID: ParsedLaneOutput] = [:]
     @FocusState private var isReaderFocused: Bool
 
     private var orderedLanes: [LanePresentation] {
@@ -441,10 +442,7 @@ private struct BlindReviewView: View {
         return orderedLanes.first(where: { $0.id == pinnedLaneID })
     }
 
-    private var activeSections: [MarkdownDocumentSection] {
-        guard let activeLane else { return [] }
-        return MarkdownOutlineParser.sections(in: activeLane.output)
-    }
+    private var activeSections: [MarkdownDocumentSection] { activeLane.flatMap { parsedOutputs[$0.id]?.sections } ?? [] }
 
     private var outlineSections: [MarkdownDocumentSection] {
         activeSections.filter { $0.title != nil }
@@ -531,15 +529,19 @@ private struct BlindReviewView: View {
         .focusEffectDisabled()
         .focused($isReaderFocused)
         .onAppear {
+            refreshParsedOutputs()
             reconcileSelection()
             isReaderFocused = true
         }
         .onChange(of: lanes) { _, _ in
+            refreshParsedOutputs()
             reconcileSelection()
         }
         .onChange(of: store.winningLaneID) { _, _ in
             reconcileSelection()
         }
+        .onChange(of: activeLaneID) { _, _ in refreshParsedOutputs() }
+        .onChange(of: pinnedLaneID) { _, _ in refreshParsedOutputs() }
         .onKeyPress(.leftArrow) {
             moveActive(by: -1)
             return .handled
@@ -672,6 +674,7 @@ private struct BlindReviewView: View {
         activeLaneID = laneID
         selectedSectionID = nil
         scrollTargetID = nil
+        refreshParsedOutputs()
         isReaderFocused = true
     }
 
@@ -695,6 +698,8 @@ private struct BlindReviewView: View {
                 pinnedLane: pinnedLane,
                 activeTitle: candidateTitle(for: activeLane),
                 pinnedTitle: candidateTitle(for: pinnedLane),
+                activeSections: activeSections,
+                pinnedSections: parsedOutputs[pinnedLane.id]?.sections ?? [],
                 isWide: isWide,
                 activeSelectedSectionID: $selectedSectionID,
                 activeScrollTargetID: $scrollTargetID,
@@ -737,6 +742,22 @@ private struct BlindReviewView: View {
             self.selectedSectionID = nil
         }
     }
+
+    private func refreshParsedOutputs() {
+        let relevant = [activeLane, pinnedLane].compactMap { $0 }
+        let relevantIDs = Set(relevant.map(\.id))
+        var next = parsedOutputs.filter { relevantIDs.contains($0.key) }
+        for lane in relevant {
+            if next[lane.id]?.output == lane.output { continue }
+            next[lane.id] = ParsedLaneOutput(output: lane.output, sections: MarkdownOutlineParser.sections(in: lane.output))
+        }
+        parsedOutputs = next
+    }
+}
+
+private struct ParsedLaneOutput {
+    let output: String
+    let sections: [MarkdownDocumentSection]
 }
 
 private struct BlindReviewOutline: View {
@@ -906,15 +927,14 @@ private struct FocusReaderSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            if let headingMarkdown = section.headingMarkdown, !headingMarkdown.isEmpty {
-                MarkdownResponseText(markdown: headingMarkdown)
+            if section.headingMarkdown != nil {
+                MarkdownResponseText(blocks: section.headingBlocks)
                     .font(section.level <= 1 ? .title2.weight(.semibold) : .title3.weight(.semibold))
-            }
-
-            if !section.bodyMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownResponseText(markdown: section.bodyMarkdown)
-            } else if section.headingMarkdown == nil {
-                MarkdownResponseText(markdown: section.markdown)
+                if !section.bodyMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    MarkdownResponseText(blocks: section.bodyBlocks)
+                }
+            } else {
+                MarkdownResponseText(blocks: section.bodyBlocks)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -922,11 +942,11 @@ private struct FocusReaderSection: View {
 }
 
 private struct MarkdownResponseText: View {
-    let markdown: String
+    let blocks: [MarkdownResponseBlock]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(MarkdownResponseBlock.parse(markdown).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
         }
@@ -950,11 +970,11 @@ private struct MarkdownResponseText: View {
             }
         case .orderedList(let values):
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                ForEach(Array(values.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Text("\(index + 1).")
+                        Text(item.label)
                             .foregroundStyle(.secondary)
-                        MarkdownInlineText(markdown: value)
+                        MarkdownInlineText(markdown: item.value)
                     }
                 }
             }
@@ -993,147 +1013,17 @@ private struct MarkdownInlineText: View {
     }
 }
 
-private enum MarkdownResponseBlock {
-    case paragraph(String)
-    case unorderedList([String])
-    case orderedList([String])
-    case code(language: String, value: String)
-
-    static func parse(_ markdown: String) -> [Self] {
-        var blocks: [Self] = []
-        var paragraphLines: [String] = []
-        var unorderedItems: [String] = []
-        var orderedItems: [String] = []
-        var codeLanguage = ""
-        var codeLines: [String] = []
-        var fenceMarker: Character?
-
-        func flushParagraph() {
-            guard !paragraphLines.isEmpty else { return }
-            blocks.append(.paragraph(paragraphLines.joined(separator: "\n")))
-            paragraphLines.removeAll(keepingCapacity: true)
-        }
-
-        func flushLists() {
-            if !unorderedItems.isEmpty {
-                blocks.append(.unorderedList(unorderedItems))
-                unorderedItems.removeAll(keepingCapacity: true)
-            }
-            if !orderedItems.isEmpty {
-                blocks.append(.orderedList(orderedItems))
-                orderedItems.removeAll(keepingCapacity: true)
-            }
-        }
-
-        func flushCode() {
-            blocks.append(.code(language: codeLanguage, value: codeLines.joined(separator: "\n")))
-            codeLanguage = ""
-            codeLines.removeAll(keepingCapacity: true)
-        }
-
-        for line in markdown.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            if let marker = fenceMarker {
-                if trimmed.hasPrefix(String(repeating: String(marker), count: 3)) {
-                    fenceMarker = nil
-                    flushCode()
-                } else {
-                    codeLines.append(line)
-                }
-                continue
-            }
-
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                flushParagraph()
-                flushLists()
-                fenceMarker = trimmed.first
-                let markerLength = trimmed.prefix(while: { $0 == fenceMarker }).count
-                codeLanguage = String(trimmed.dropFirst(markerLength)).trimmingCharacters(in: .whitespaces)
-                codeLines.removeAll(keepingCapacity: true)
-                continue
-            }
-
-            if trimmed.isEmpty {
-                flushParagraph()
-                flushLists()
-                continue
-            }
-
-            if let item = listItem(in: trimmed, marker: "-"), !item.isEmpty {
-                flushParagraph()
-                if !orderedItems.isEmpty { flushLists() }
-                unorderedItems.append(item)
-                continue
-            }
-            if let item = listItem(in: trimmed, marker: "*"), !item.isEmpty {
-                flushParagraph()
-                if !orderedItems.isEmpty { flushLists() }
-                unorderedItems.append(item)
-                continue
-            }
-            if let item = listItem(in: trimmed, marker: "+"), !item.isEmpty {
-                flushParagraph()
-                if !orderedItems.isEmpty { flushLists() }
-                unorderedItems.append(item)
-                continue
-            }
-            if let item = orderedListItem(in: trimmed), !item.isEmpty {
-                flushParagraph()
-                if !unorderedItems.isEmpty { flushLists() }
-                orderedItems.append(item)
-                continue
-            }
-
-            if !unorderedItems.isEmpty || !orderedItems.isEmpty {
-                flushLists()
-            }
-            paragraphLines.append(trimmed)
-        }
-
-        if fenceMarker != nil {
-            flushCode()
-        } else {
-            flushParagraph()
-            flushLists()
-        }
-        return blocks
-    }
-
-    private static func listItem(in line: String, marker: Character) -> String? {
-        let prefix = "\(marker) "
-        guard line.hasPrefix(prefix) else { return nil }
-        return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
-    }
-
-    private static func orderedListItem(in line: String) -> String? {
-        let characters = Array(line)
-        var index = 0
-        while index < characters.count, characters[index].isNumber {
-            index += 1
-        }
-        guard index > 0, index + 1 < characters.count, characters[index] == "." || characters[index] == ")", characters[index + 1] == " " else { return nil }
-        return String(characters[(index + 2)...]).trimmingCharacters(in: .whitespaces)
-    }
-}
-
 private struct FocusReaderComparison: View {
     let activeLane: LanePresentation
     let pinnedLane: LanePresentation
     let activeTitle: String
     let pinnedTitle: String
+    let activeSections: [MarkdownDocumentSection]
+    let pinnedSections: [MarkdownDocumentSection]
     let isWide: Bool
     @Binding var activeSelectedSectionID: String?
     @Binding var activeScrollTargetID: String?
     let onUnpin: () -> Void
-
-    private var activeSections: [MarkdownDocumentSection] {
-        MarkdownOutlineParser.sections(in: activeLane.output)
-    }
-
-    private var pinnedSections: [MarkdownDocumentSection] {
-        MarkdownOutlineParser.sections(in: pinnedLane.output)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1267,12 +1157,7 @@ private struct BlindVerdictInspector: View {
                     TextField("Add a note about why this response is the best…", text: $store.reviewNote, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(4...7)
-                        .onChange(of: store.reviewNote) { _, note in
-                            if note.count > 500 {
-                                store.reviewNote = String(note.prefix(500))
-                            }
-                        }
-                    Text("\(store.reviewNote.count) / 500")
+                    Text("\(store.reviewNote.count) characters")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .trailing)

@@ -10,6 +10,8 @@ public struct MarkdownDocumentSection: Hashable, Identifiable, Sendable {
     public let markdown: String
     public let headingMarkdown: String?
     public let bodyMarkdown: String
+    public let headingBlocks: [MarkdownResponseBlock]
+    public let bodyBlocks: [MarkdownResponseBlock]
 
     public init(
         id: String,
@@ -17,7 +19,9 @@ public struct MarkdownDocumentSection: Hashable, Identifiable, Sendable {
         level: Int,
         markdown: String,
         headingMarkdown: String? = nil,
-        bodyMarkdown: String
+        bodyMarkdown: String,
+        headingBlocks: [MarkdownResponseBlock]? = nil,
+        bodyBlocks: [MarkdownResponseBlock]? = nil
     ) {
         self.id = id
         self.title = title
@@ -25,6 +29,8 @@ public struct MarkdownDocumentSection: Hashable, Identifiable, Sendable {
         self.markdown = markdown
         self.headingMarkdown = headingMarkdown
         self.bodyMarkdown = bodyMarkdown
+        self.headingBlocks = headingBlocks ?? (headingMarkdown.map(MarkdownResponseParser.parse) ?? [])
+        self.bodyBlocks = bodyBlocks ?? MarkdownResponseParser.parse(bodyMarkdown.isEmpty ? markdown : bodyMarkdown)
     }
 }
 
@@ -37,23 +43,18 @@ public enum MarkdownOutlineParser {
     public static func sections(in markdown: String) -> [MarkdownDocumentSection] {
         let lines = markdown.components(separatedBy: "\n")
         var headings: [(line: Int, level: Int, title: String)] = []
-        var fenceMarker: Character?
+        var fence: MarkdownFence?
 
         for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if let marker = fenceMarker {
-                if trimmed.hasPrefix(String(repeating: String(marker), count: 3)) {
-                    fenceMarker = nil
+            if let currentFence = fence {
+                if let closingFence = MarkdownFenceParser.fence(in: line), closingFence.closes(currentFence) {
+                    fence = nil
                 }
                 continue
             }
 
-            if trimmed.hasPrefix("```") {
-                fenceMarker = "`"
-                continue
-            }
-            if trimmed.hasPrefix("~~~") {
-                fenceMarker = "~"
+            if let openingFence = MarkdownFenceParser.fence(in: line) {
+                fence = openingFence
                 continue
             }
 
@@ -102,7 +103,9 @@ public enum MarkdownOutlineParser {
                     level: heading.level,
                     markdown: sectionMarkdown,
                     headingMarkdown: headingMarkdown,
-                    bodyMarkdown: bodyMarkdown
+                    bodyMarkdown: bodyMarkdown,
+                    headingBlocks: MarkdownResponseParser.parse(headingMarkdown),
+                    bodyBlocks: MarkdownResponseParser.parse(bodyMarkdown)
                 )
             )
         }

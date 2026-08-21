@@ -59,4 +59,16 @@ struct MarkdownOutlineTests {
         #expect(sections[0].markdown == "No headings here.")
         #expect(sections[0].bodyMarkdown == "No headings here.")
     }
+
+    @Test
+    func requiresMatchingFenceMarkerAndOpeningLength() {
+        let sections = MarkdownOutlineParser.sections(in: "# Real\n````\n# hidden\n```\n# still hidden\n````\n## Visible")
+        #expect(sections.map(\.title) == ["Real", "Visible"])
+    }
+
+    @Test
+    func ignoresFourSpaceAndTabIndentedFenceLikeHeadings() {
+        let sections = MarkdownOutlineParser.sections(in: "# Real\n    ```\n    # code\n    ```\n\t```\n\t# code\n\t```\n## Visible")
+        #expect(sections.map(\.title) == ["Real", "Visible"])
+    }
 }

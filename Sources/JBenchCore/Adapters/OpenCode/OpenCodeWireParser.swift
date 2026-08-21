@@ -69,17 +69,16 @@ enum OpenCodeWireParser {
         return string(in: root, paths: paths)
     }
 
-    static func version(from rawJSON: String) -> String? {
-        string(in: rawJSON, paths: [["version"], ["data", "version"], ["properties", "version"]])
+    static func version(fromCommandOutput output: String) -> String? {
+        let value = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
-    static func authenticationStatus(from rawJSON: String, statusCode: Int) -> AuthenticationStatus {
+    static func authenticationStatus(fromProviderResponse rawJSON: String, statusCode: Int) -> AuthenticationStatus {
         guard (200..<300).contains(statusCode) else { return statusCode == 401 || statusCode == 403 ? .missing : .unknown }
         guard let root = jsonObject(rawJSON) else { return .unknown }
-        let values = flattenedStrings(in: root).map { $0.lowercased() }
-        if values.contains(where: { ["connected", "authenticated", "ready", "valid"].contains($0) }) { return .ready }
-        if values.contains(where: { ["missing", "unauthenticated", "disconnected", "invalid"].contains($0) }) { return .missing }
-        return .unknown
+        guard let connected = root["connected"] as? [String] else { return .unknown }
+        return connected.isEmpty ? .missing : .ready
     }
 
     private static func metrics(in root: [String: Any]) -> AttemptMetrics? {
@@ -164,12 +163,6 @@ enum OpenCodeWireParser {
         }
     }
 
-    private static func flattenedStrings(in value: Any) -> [String] {
-        if let string = value as? String { return [string] }
-        if let dictionary = value as? [String: Any] { return dictionary.values.flatMap(flattenedStrings) }
-        if let array = value as? [Any] { return array.flatMap(flattenedStrings) }
-        return []
-    }
 }
 
 struct OpenCodeParsedEvent: Sendable {

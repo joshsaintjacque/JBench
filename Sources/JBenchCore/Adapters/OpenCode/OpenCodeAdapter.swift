@@ -47,6 +47,8 @@ public actor OpenCodeAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
     /// Starts a short-lived local server and queries only documented discovery
     /// paths. It does not create a session or send a provider prompt.
     public func discover(executable: URL) async throws -> HarnessDiscoveryResult {
+        let versionResult = try? SystemCommand.run(executable: executable, arguments: ["--version"])
+        let reportedVersion = versionResult.flatMap { OpenCodeWireParser.version(fromCommandOutput: $0.outputText) }
         let launched = try Self.launch(executablePath: executable.path)
         do {
             let baseURL = try await Self.serverURL(from: launched.output)
@@ -54,17 +56,14 @@ public actor OpenCodeAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
                 throw OpenCodeAdapterError.protocolFailure("The OpenCode server did not become ready for discovery.")
             }
             let directoryPath = FileManager.default.currentDirectoryPath
-            async let versionResponse = Self.optionalRequest(baseURL: baseURL, path: "/version", directoryPath: directoryPath)
             async let providerResponse = Self.optionalRequest(baseURL: baseURL, path: "/provider", directoryPath: directoryPath)
             async let configuredProviderResponse = Self.optionalRequest(baseURL: baseURL, path: "/config/providers", directoryPath: directoryPath)
-            async let authResponse = Self.optionalRequest(baseURL: baseURL, path: "/provider/auth", directoryPath: directoryPath)
-            let (version, providers, configuredProviders, auth) = await (versionResponse, providerResponse, configuredProviderResponse, authResponse)
+            let (providers, configuredProviders) = await (providerResponse, configuredProviderResponse)
 
             let providerModels = providers.map { OpenCodeWireParser.catalogEntries(from: $0.body, source: "OpenCode GET /provider") } ?? []
             let configuredModels = configuredProviders.map { OpenCodeWireParser.catalogEntries(from: $0.body, source: "OpenCode GET /config/providers") } ?? []
             let models = Self.deduplicatedCatalog(providerModels + configuredModels)
-            let reportedVersion = version.flatMap { OpenCodeWireParser.version(from: $0.body) }
-            let authentication = auth.map { OpenCodeWireParser.authenticationStatus(from: $0.body, statusCode: $0.statusCode) } ?? .unknown
+            let authentication = providers.map { OpenCodeWireParser.authenticationStatus(fromProviderResponse: $0.body, statusCode: $0.statusCode) } ?? .unknown
             let result = HarnessDiscoveryResult(
                 version: reportedVersion,
                 authenticationStatus: authentication,
@@ -377,9 +376,10 @@ public actor OpenCodeAdapter: HarnessAdapter, HarnessDiscoveryAdapter {
     }
 
     private static func optionalRequest(baseURL: URL, path: String, directoryPath: String) async -> HTTPResult? {
-        guard let response = try? await request(method: "GET", baseURL: baseURL, path: path, directoryPath: directoryPath),
-              (200..<300).contains(response.statusCode) else { return nil }
-        return response
+        // Keep HTTP failures as evidence for discovery parsers (for example,
+        // /provider 401/403 means authentication is missing). Only transport
+        // failures are treated as unavailable.
+        return try? await request(method: "GET", baseURL: baseURL, path: path, directoryPath: directoryPath)
     }
 
     private static func deduplicatedCatalog(_ entries: [ModelCatalogEntry]) -> [ModelCatalogEntry] {

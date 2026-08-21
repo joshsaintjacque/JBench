@@ -41,6 +41,7 @@ struct LanesWorkspace: View {
                 }
             } else {
                 BlindReviewView(store: store, lanes: lanes)
+                    .frame(minHeight: 620)
             }
         }
         .confirmationDialog("Export sensitive run data?", isPresented: $store.isShowingExportWarning, titleVisibility: .visible) {
@@ -356,10 +357,13 @@ private struct ApprovalCard: View {
     @Bindable var store: JBenchAppStore
     let lane: LanePresentation
     let approval: ApprovalRequest
+    var hidesSensitiveSummary = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Approval needed", systemImage: "hand.raised.fill").font(.headline).foregroundStyle(.orange)
-            Text(approval.summary).font(.caption)
+            Text(hidesSensitiveSummary ? "This candidate needs permission to continue." : approval.summary)
+                .font(.caption)
             HStack {
                 Button("Decline", role: .destructive) { store.reply(.decline, laneID: lane.id) }
                 Spacer()
@@ -412,128 +416,240 @@ private struct WorktreeControls: View {
 private struct BlindReviewView: View {
     @Bindable var store: JBenchAppStore
     let lanes: [LanePresentation]
-    @State private var expandedResponses: Set<UUID> = []
+    @State private var activeLaneID: UUID?
+    @State private var pinnedLaneID: UUID?
+    @State private var selectedSectionID: String?
+    @State private var scrollTargetID: String?
+    @FocusState private var isReaderFocused: Bool
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Blind review").font(.headline)
-                    Text(store.isRevealOn ? "Identities revealed. Your manual verdict is stored with the run." : "Model and harness names are hidden. There is no automatic judge or prose diff.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Toggle("Reveal identities", isOn: $store.isRevealOn)
-                    .toggleStyle(.switch)
-                    .disabled(!store.canRevealIdentities)
+    private var orderedLanes: [LanePresentation] {
+        lanes.sorted {
+            if $0.blindReviewOrder != $1.blindReviewOrder {
+                return $0.blindReviewOrder < $1.blindReviewOrder
             }
-            ForEach(lanes.sorted { $0.blindReviewOrder < $1.blindReviewOrder }) { lane in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Text(candidateTitle(for: lane))
-                            .font(.headline)
-                        LaneStatusBadge(state: lane.state)
-                        Spacer()
-                        if store.winningLaneID == lane.id {
-                            Button("Selected winner") { store.winningLaneID = lane.id }
-                                .buttonStyle(.borderedProminent)
-                        } else {
-                            Button("Select winner") { store.winningLaneID = lane.id }
-                                .buttonStyle(.bordered)
-                        }
-                    }
-
-                    if lane.state == .running || lane.state == .starting {
-                        if lane.output.isEmpty {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("Waiting for streamed output…")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 4)
-                        } else {
-                            Text(lane.output)
-                                .lineLimit(expandedResponses.contains(lane.id) ? nil : 4)
-                                .textSelection(.enabled)
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.mini)
-                                Text("Generating response…")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    } else if lane.output.isEmpty {
-                        Text("No response recorded.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 4)
-                    } else {
-                        Text(lane.output)
-                            .lineLimit(expandedResponses.contains(lane.id) ? nil : 4)
-                            .textSelection(.enabled)
-                    }
-
-                    if !lane.output.isEmpty {
-                        Button {
-                            if expandedResponses.contains(lane.id) {
-                                expandedResponses.remove(lane.id)
-                            } else {
-                                expandedResponses.insert(lane.id)
-                            }
-                        } label: {
-                            Label(
-                                expandedResponses.contains(lane.id) ? "Show less" : "Show full response",
-                                systemImage: expandedResponses.contains(lane.id) ? "chevron.up" : "chevron.down"
-                            )
-                        }
-                        .buttonStyle(.link)
-                        .controlSize(.small)
-                    }
-                }
-                .padding(12).background(.background, in: RoundedRectangle(cornerRadius: 10)).overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary) }
-            }
-            TextField("Why this response won (optional)", text: $store.reviewNote, axis: .vertical)
-                .textFieldStyle(.roundedBorder).lineLimit(2...4)
-            HStack(spacing: 12) {
-                if store.isRevealOn {
-                    if store.section == .newRun {
-                        Button {
-                            store.viewActiveRunInHistory()
-                        } label: {
-                            Label("View in History", systemImage: "clock.arrow.circlepath")
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button {
-                            store.startNewRun()
-                        } label: {
-                            Label("Start New Run", systemImage: "plus.circle")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(store.isBackgroundRunActive)
-                    }
-
-                    Spacer()
-
-                    Button("Update verdict") { store.saveManualVerdict() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.winningLaneID == nil)
-                } else {
-                    Button("Skip verdict and reveal") { store.skipManualVerdict() }
-                    Spacer()
-                    Button("Save manual verdict") { store.saveManualVerdict() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(store.winningLaneID == nil)
-                }
-            }
+            return $0.id.uuidString < $1.id.uuidString
         }
-        .padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary) }
     }
 
-    private func candidateTitle(for lane: LanePresentation) -> String {
+    private var activeLane: LanePresentation? {
+        guard let activeLaneID else { return orderedLanes.first }
+        return orderedLanes.first(where: { $0.id == activeLaneID }) ?? orderedLanes.first
+    }
+
+    private var pinnedLane: LanePresentation? {
+        guard let pinnedLaneID else { return nil }
+        return orderedLanes.first(where: { $0.id == pinnedLaneID })
+    }
+
+    private var activeSections: [MarkdownDocumentSection] {
+        guard let activeLane else { return [] }
+        return MarkdownOutlineParser.sections(in: activeLane.output)
+    }
+
+    private var outlineSections: [MarkdownDocumentSection] {
+        activeSections.filter { $0.title != nil }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            reviewHeader
+            Divider()
+            candidateRail
+            Divider()
+
+            if let activeLane {
+                GeometryReader { geometry in
+                    VStack(spacing: 0) {
+                        if let approval = activeLane.approval {
+                            ApprovalCard(
+                                store: store,
+                                lane: activeLane,
+                                approval: approval,
+                                hidesSensitiveSummary: store.hidesReviewIdentities
+                            )
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 12)
+                            Divider()
+                        }
+
+                        if geometry.size.width >= 760 {
+                            HStack(spacing: 0) {
+                                if geometry.size.width >= 980 && !outlineSections.isEmpty {
+                                    BlindReviewOutline(
+                                        sections: outlineSections,
+                                        selectedSectionID: selectedSectionID,
+                                        onSelect: selectSection
+                                    )
+                                    .frame(minWidth: 172, idealWidth: 204, maxWidth: 224)
+                                    Divider()
+                                }
+
+                                readerSurface(for: activeLane, isWide: geometry.size.width >= 1_180)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                                Divider()
+                                BlindVerdictInspector(
+                                    store: store,
+                                    lane: activeLane,
+                                    candidateTitle: candidateTitle(for: activeLane),
+                                    pinnedLaneID: $pinnedLaneID
+                                )
+                                .frame(width: 284)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            VStack(spacing: 0) {
+                                readerSurface(for: activeLane, isWide: false)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                Divider()
+                                BlindVerdictInspector(
+                                    store: store,
+                                    lane: activeLane,
+                                    candidateTitle: candidateTitle(for: activeLane),
+                                    pinnedLaneID: $pinnedLaneID
+                                )
+                                .frame(maxHeight: 260)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                ContentUnavailableView(
+                    "No candidates to review",
+                    systemImage: "text.magnifyingglass",
+                    description: Text("Start a run or select a history record to read responses here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary) }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isReaderFocused)
+        .onAppear {
+            reconcileSelection()
+            isReaderFocused = true
+        }
+        .onChange(of: lanes) { _, _ in
+            reconcileSelection()
+        }
+        .onChange(of: store.winningLaneID) { _, _ in
+            reconcileSelection()
+        }
+        .onKeyPress(.leftArrow) {
+            moveActive(by: -1)
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            moveActive(by: 1)
+            return .handled
+        }
+    }
+
+    private var reviewHeader: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Blind review")
+                    .font(.title3.weight(.semibold))
+                Text(store.isRevealOn ? "Identities revealed. Your manual verdict is stored with the run." : "Read one response at a time. Model and harness names stay hidden until reveal.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 12)
+            Toggle("Reveal identities", isOn: $store.isRevealOn)
+                .toggleStyle(.switch)
+                .disabled(!store.canRevealIdentities)
+                .help(store.canRevealIdentities ? "Show model and harness identities" : "Save or skip the verdict before revealing identities")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    private var candidateRail: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 9) {
+                Button {
+                    moveActive(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .disabled(activeIndex == nil || activeIndex == 0)
+                .accessibilityLabel("Previous candidate")
+
+                ForEach(Array(orderedLanes.enumerated()), id: \.element.id) { index, lane in
+                    Button {
+                        selectLane(lane.id)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(candidateTitle(for: lane, index: index))
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(1)
+                            if pinnedLaneID == lane.id {
+                                Image(systemName: "pin.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tint)
+                                    .accessibilityLabel("Pinned for comparison")
+                            }
+                            LaneStatusBadge(state: lane.state)
+                        }
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .frame(minWidth: 132)
+                        .background(
+                            activeLaneID == lane.id ? Color.accentColor.opacity(0.10) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(activeLaneID == lane.id ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: activeLaneID == lane.id ? 1.2 : 0.7)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(candidateTitle(for: lane, index: index))
+                    .accessibilityValue(
+                        lane.state.rawValue + (pinnedLaneID == lane.id ? ", pinned for comparison" : "")
+                    )
+                }
+
+                Text(positionLabel)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 42)
+
+                Button {
+                    moveActive(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .disabled(activeIndex == nil || activeIndex == orderedLanes.count - 1)
+                .accessibilityLabel("Next candidate")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+        }
+        .frame(minHeight: 58)
+    }
+
+    private var activeIndex: Int? {
+        guard let activeLaneID else { return orderedLanes.isEmpty ? nil : 0 }
+        return orderedLanes.firstIndex(where: { $0.id == activeLaneID })
+    }
+
+    private var positionLabel: String {
+        guard let activeIndex else { return "0 of 0" }
+        return "\(activeIndex + 1) of \(orderedLanes.count)"
+    }
+
+    private func candidateTitle(for lane: LanePresentation, index: Int? = nil) -> String {
         if store.isRevealOn {
             let harness: String
             switch lane.configuration.harness {
@@ -544,9 +660,710 @@ private struct BlindReviewView: View {
             }
             return "\(harness) · \(lane.configuration.model)"
         }
-        let ordered = lanes.sorted { $0.blindReviewOrder < $1.blindReviewOrder }
-        let index = ordered.firstIndex(where: { $0.id == lane.id }) ?? 0
-        return "Candidate \(String(UnicodeScalar(65 + index)!))"
+        let position = index ?? orderedLanes.firstIndex(where: { $0.id == lane.id }) ?? 0
+        guard position < 26, let scalar = UnicodeScalar(65 + position) else {
+            return "Candidate \(position + 1)"
+        }
+        return "Candidate \(String(scalar))"
+    }
+
+    private func selectLane(_ laneID: UUID) {
+        guard orderedLanes.contains(where: { $0.id == laneID }) else { return }
+        activeLaneID = laneID
+        selectedSectionID = nil
+        scrollTargetID = nil
+        isReaderFocused = true
+    }
+
+    private func moveActive(by offset: Int) {
+        guard let activeIndex, !orderedLanes.isEmpty else { return }
+        let nextIndex = min(max(activeIndex + offset, 0), orderedLanes.count - 1)
+        guard nextIndex != activeIndex else { return }
+        selectLane(orderedLanes[nextIndex].id)
+    }
+
+    private func selectSection(_ sectionID: String) {
+        selectedSectionID = sectionID
+        scrollTargetID = sectionID
+    }
+
+    @ViewBuilder
+    private func readerSurface(for activeLane: LanePresentation, isWide: Bool) -> some View {
+        if let pinnedLane, pinnedLane.id != activeLane.id {
+            FocusReaderComparison(
+                activeLane: activeLane,
+                pinnedLane: pinnedLane,
+                activeTitle: candidateTitle(for: activeLane),
+                pinnedTitle: candidateTitle(for: pinnedLane),
+                isWide: isWide,
+                activeSelectedSectionID: $selectedSectionID,
+                activeScrollTargetID: $scrollTargetID,
+                onUnpin: { pinnedLaneID = nil }
+            )
+        } else {
+            FocusReaderDocument(
+                lane: activeLane,
+                sections: activeSections,
+                selectedSectionID: $selectedSectionID,
+                scrollTargetID: $scrollTargetID
+            )
+        }
+    }
+
+    private func reconcileSelection() {
+        guard !orderedLanes.isEmpty else {
+            activeLaneID = nil
+            pinnedLaneID = nil
+            selectedSectionID = nil
+            scrollTargetID = nil
+            return
+        }
+
+        let availableIDs = Set(orderedLanes.map(\.id))
+        let nextActiveID = activeLaneID.flatMap { availableIDs.contains($0) ? $0 : nil }
+            ?? store.winningLaneID.flatMap { availableIDs.contains($0) ? $0 : nil }
+            ?? orderedLanes[0].id
+        if activeLaneID != nextActiveID {
+            activeLaneID = nextActiveID
+            selectedSectionID = nil
+            scrollTargetID = nil
+        }
+        if let pinnedLaneID, !availableIDs.contains(pinnedLaneID) {
+            self.pinnedLaneID = nil
+        }
+
+        let sectionIDs = Set(activeSections.map(\.id))
+        if let selectedSectionID, !sectionIDs.contains(selectedSectionID) {
+            self.selectedSectionID = nil
+        }
+    }
+}
+
+private struct BlindReviewOutline: View {
+    let sections: [MarkdownDocumentSection]
+    let selectedSectionID: String?
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Outline")
+                    .font(.headline)
+                    .padding(.bottom, 8)
+
+                ForEach(sections) { section in
+                    if let title = section.title {
+                        Button {
+                            onSelect(section.id)
+                        } label: {
+                            Text(title)
+                                .font(section.level <= 1 ? .subheadline.weight(.medium) : .subheadline)
+                                .foregroundStyle(selectedSectionID == section.id ? .primary : .secondary)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.leading, CGFloat(max(section.level - 1, 0) * 10))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 8)
+                                .background(
+                                    selectedSectionID == section.id ? Color.accentColor.opacity(0.10) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 7)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct FocusReaderDocument: View {
+    let lane: LanePresentation
+    let sections: [MarkdownDocumentSection]
+    @Binding var selectedSectionID: String?
+    @Binding var scrollTargetID: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if lane.state == .running || lane.state == .starting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(lane.output.isEmpty ? "Waiting for streamed output…" : "Generating response…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 34)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+            }
+
+            if lane.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ContentUnavailableView(
+                    emptyTitle,
+                    systemImage: emptySystemImage,
+                    description: Text(emptyDescription)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { reader in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 30) {
+                            ForEach(sections) { section in
+                                FocusReaderSection(section: section)
+                                    .frame(maxWidth: 760, alignment: .leading)
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(
+                                                key: FocusReaderSectionPositionKey.self,
+                                                value: [section.id: geometry.frame(in: .named("focus-reader-scroll")).minY]
+                                            )
+                                        }
+                                    }
+                                    .id(section.id)
+                            }
+                        }
+                        .padding(.horizontal, 34)
+                        .padding(.vertical, 28)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                    }
+                    .coordinateSpace(name: "focus-reader-scroll")
+                    .onChange(of: scrollTargetID) { _, target in
+                        guard let target else { return }
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            reader.scrollTo(target, anchor: .top)
+                        }
+                        scrollTargetID = nil
+                    }
+                    .onPreferenceChange(FocusReaderSectionPositionKey.self) { positions in
+                        guard let visibleID = visibleSectionID(from: positions), selectedSectionID != visibleID else { return }
+                        selectedSectionID = visibleID
+                    }
+                }
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if sections.count > 1 {
+                Label("Select text to copy", systemImage: "text.cursor")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+                    .padding(14)
+                    .allowsHitTesting(false)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Response text")
+    }
+
+    private var emptyTitle: String {
+        switch lane.state {
+        case .running, .starting: "Waiting for response"
+        case .queued: "Queued"
+        case .waitingForApproval: "Waiting for approval"
+        case .failed, .timedOut: "No response recorded"
+        case .cancelled, .interrupted: "No response recorded"
+        case .completed: "No response recorded"
+        }
+    }
+
+    private var emptySystemImage: String {
+        switch lane.state {
+        case .running, .starting: "arrow.triangle.2.circlepath"
+        case .queued: "clock"
+        case .waitingForApproval: "hand.raised.fill"
+        case .failed, .timedOut: "text.badge.xmark"
+        case .cancelled, .interrupted: "xmark.circle"
+        case .completed: "text.badge.xmark"
+        }
+    }
+
+    private var emptyDescription: String {
+        switch lane.state {
+        case .running, .starting: "The response will appear here as it streams in."
+        case .queued: "This candidate has not started yet."
+        case .waitingForApproval: "Approve the request above to continue this candidate."
+        case .failed, .timedOut: "This candidate finished without a response."
+        case .cancelled, .interrupted: "This candidate stopped before returning a response."
+        case .completed: "This candidate completed without a response."
+        }
+    }
+
+    private func visibleSectionID(from positions: [String: CGFloat]) -> String? {
+        guard !positions.isEmpty else { return nil }
+        let candidates = positions.filter { $0.value <= 120 }
+        return candidates.max(by: { $0.value < $1.value })?.key
+            ?? positions.min(by: { abs($0.value) < abs($1.value) })?.key
+    }
+}
+
+private struct FocusReaderSection: View {
+    let section: MarkdownDocumentSection
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            if let headingMarkdown = section.headingMarkdown, !headingMarkdown.isEmpty {
+                MarkdownResponseText(markdown: headingMarkdown)
+                    .font(section.level <= 1 ? .title2.weight(.semibold) : .title3.weight(.semibold))
+            }
+
+            if !section.bodyMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownResponseText(markdown: section.bodyMarkdown)
+            } else if section.headingMarkdown == nil {
+                MarkdownResponseText(markdown: section.markdown)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MarkdownResponseText: View {
+    let markdown: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(MarkdownResponseBlock.parse(markdown).enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+        .lineSpacing(4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: MarkdownResponseBlock) -> some View {
+        switch block {
+        case .paragraph(let value):
+            MarkdownInlineText(markdown: value)
+        case .unorderedList(let values):
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(Array(values.enumerated()), id: \.offset) { _, value in
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Text("•")
+                        MarkdownInlineText(markdown: value)
+                    }
+                }
+            }
+        case .orderedList(let values):
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Text("\(index + 1).")
+                            .foregroundStyle(.secondary)
+                        MarkdownInlineText(markdown: value)
+                    }
+                }
+            }
+        case .code(let language, let value):
+            VStack(alignment: .leading, spacing: 0) {
+                if !language.isEmpty {
+                    Text(language)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 7)
+                }
+                Text(value)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(14)
+            .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 9))
+        }
+    }
+}
+
+private struct MarkdownInlineText: View {
+    let markdown: String
+
+    var body: some View {
+        if let attributed = try? AttributedString(markdown: markdown) {
+            Text(attributed)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(markdown)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private enum MarkdownResponseBlock {
+    case paragraph(String)
+    case unorderedList([String])
+    case orderedList([String])
+    case code(language: String, value: String)
+
+    static func parse(_ markdown: String) -> [Self] {
+        var blocks: [Self] = []
+        var paragraphLines: [String] = []
+        var unorderedItems: [String] = []
+        var orderedItems: [String] = []
+        var codeLanguage = ""
+        var codeLines: [String] = []
+        var fenceMarker: Character?
+
+        func flushParagraph() {
+            guard !paragraphLines.isEmpty else { return }
+            blocks.append(.paragraph(paragraphLines.joined(separator: "\n")))
+            paragraphLines.removeAll(keepingCapacity: true)
+        }
+
+        func flushLists() {
+            if !unorderedItems.isEmpty {
+                blocks.append(.unorderedList(unorderedItems))
+                unorderedItems.removeAll(keepingCapacity: true)
+            }
+            if !orderedItems.isEmpty {
+                blocks.append(.orderedList(orderedItems))
+                orderedItems.removeAll(keepingCapacity: true)
+            }
+        }
+
+        func flushCode() {
+            blocks.append(.code(language: codeLanguage, value: codeLines.joined(separator: "\n")))
+            codeLanguage = ""
+            codeLines.removeAll(keepingCapacity: true)
+        }
+
+        for line in markdown.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if let marker = fenceMarker {
+                if trimmed.hasPrefix(String(repeating: String(marker), count: 3)) {
+                    fenceMarker = nil
+                    flushCode()
+                } else {
+                    codeLines.append(line)
+                }
+                continue
+            }
+
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                flushParagraph()
+                flushLists()
+                fenceMarker = trimmed.first
+                let markerLength = trimmed.prefix(while: { $0 == fenceMarker }).count
+                codeLanguage = String(trimmed.dropFirst(markerLength)).trimmingCharacters(in: .whitespaces)
+                codeLines.removeAll(keepingCapacity: true)
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                flushLists()
+                continue
+            }
+
+            if let item = listItem(in: trimmed, marker: "-"), !item.isEmpty {
+                flushParagraph()
+                if !orderedItems.isEmpty { flushLists() }
+                unorderedItems.append(item)
+                continue
+            }
+            if let item = listItem(in: trimmed, marker: "*"), !item.isEmpty {
+                flushParagraph()
+                if !orderedItems.isEmpty { flushLists() }
+                unorderedItems.append(item)
+                continue
+            }
+            if let item = listItem(in: trimmed, marker: "+"), !item.isEmpty {
+                flushParagraph()
+                if !orderedItems.isEmpty { flushLists() }
+                unorderedItems.append(item)
+                continue
+            }
+            if let item = orderedListItem(in: trimmed), !item.isEmpty {
+                flushParagraph()
+                if !unorderedItems.isEmpty { flushLists() }
+                orderedItems.append(item)
+                continue
+            }
+
+            if !unorderedItems.isEmpty || !orderedItems.isEmpty {
+                flushLists()
+            }
+            paragraphLines.append(trimmed)
+        }
+
+        if fenceMarker != nil {
+            flushCode()
+        } else {
+            flushParagraph()
+            flushLists()
+        }
+        return blocks
+    }
+
+    private static func listItem(in line: String, marker: Character) -> String? {
+        let prefix = "\(marker) "
+        guard line.hasPrefix(prefix) else { return nil }
+        return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func orderedListItem(in line: String) -> String? {
+        let characters = Array(line)
+        var index = 0
+        while index < characters.count, characters[index].isNumber {
+            index += 1
+        }
+        guard index > 0, index + 1 < characters.count, characters[index] == "." || characters[index] == ")", characters[index + 1] == " " else { return nil }
+        return String(characters[(index + 2)...]).trimmingCharacters(in: .whitespaces)
+    }
+}
+
+private struct FocusReaderComparison: View {
+    let activeLane: LanePresentation
+    let pinnedLane: LanePresentation
+    let activeTitle: String
+    let pinnedTitle: String
+    let isWide: Bool
+    @Binding var activeSelectedSectionID: String?
+    @Binding var activeScrollTargetID: String?
+    let onUnpin: () -> Void
+
+    private var activeSections: [MarkdownDocumentSection] {
+        MarkdownOutlineParser.sections(in: activeLane.output)
+    }
+
+    private var pinnedSections: [MarkdownDocumentSection] {
+        MarkdownOutlineParser.sections(in: pinnedLane.output)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Label("Pinned comparison", systemImage: "rectangle.split.2x1")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Unpin", systemImage: "pin.slash", action: onUnpin)
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .accessibilityLabel("Unpin \(pinnedTitle) from comparison")
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 9)
+            .background(.quaternary.opacity(0.28))
+
+            Divider()
+
+            if isWide {
+                HStack(spacing: 0) {
+                    comparisonPane(
+                        lane: activeLane,
+                        title: activeTitle,
+                        sections: activeSections,
+                        selectedSectionID: $activeSelectedSectionID,
+                        scrollTargetID: $activeScrollTargetID
+                    )
+                    Divider()
+                    comparisonPane(
+                        lane: pinnedLane,
+                        title: pinnedTitle,
+                        sections: pinnedSections,
+                        selectedSectionID: .constant(nil),
+                        scrollTargetID: .constant(nil)
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        comparisonPane(
+                            lane: activeLane,
+                            title: activeTitle,
+                            sections: activeSections,
+                            selectedSectionID: $activeSelectedSectionID,
+                            scrollTargetID: $activeScrollTargetID
+                        )
+                        .frame(height: 340)
+                        Divider()
+                        comparisonPane(
+                            lane: pinnedLane,
+                            title: pinnedTitle,
+                            sections: pinnedSections,
+                            selectedSectionID: .constant(nil),
+                            scrollTargetID: .constant(nil)
+                        )
+                        .frame(height: 340)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func comparisonPane(
+        lane: LanePresentation,
+        title: String,
+        sections: [MarkdownDocumentSection],
+        selectedSectionID: Binding<String?>,
+        scrollTargetID: Binding<String?>
+    ) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                LaneStatusBadge(state: lane.state)
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(.background)
+
+            Divider()
+
+            FocusReaderDocument(
+                lane: lane,
+                sections: sections,
+                selectedSectionID: selectedSectionID,
+                scrollTargetID: scrollTargetID
+            )
+        }
+    }
+}
+
+private struct BlindVerdictInspector: View {
+    @Bindable var store: JBenchAppStore
+    let lane: LanePresentation
+    let candidateTitle: String
+    @Binding var pinnedLaneID: UUID?
+
+    private var isPinned: Bool { pinnedLaneID == lane.id }
+    private var hasSelection: Bool { store.winningLaneID == lane.id }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Select \(candidateTitle)")
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(2)
+                        Text(statusDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    LaneStatusBadge(state: lane.state)
+                }
+
+                Text("Choose the winner for this run. You can add a note to explain why this response won.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Why this response won (optional)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("Add a note about why this response is the best…", text: $store.reviewNote, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(4...7)
+                        .onChange(of: store.reviewNote) { _, note in
+                            if note.count > 500 {
+                                store.reviewNote = String(note.prefix(500))
+                            }
+                        }
+                    Text("\(store.reviewNote.count) / 500")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+
+                Button {
+                    store.winningLaneID = lane.id
+                } label: {
+                    Label(hasSelection ? "Selected \(candidateTitle)" : "Select \(candidateTitle)", systemImage: hasSelection ? "checkmark.circle.fill" : "checkmark.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button {
+                    pinnedLaneID = isPinned ? nil : lane.id
+                } label: {
+                    Label(isPinned ? "Pinned for comparison" : "Pin for comparison", systemImage: isPinned ? "pin.fill" : "pin")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+
+                Text(isPinned ? "Pinned in this review. Switch candidates to compare this response with the active candidate." : "Pin this response to compare it with another candidate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+                verdictActions
+            }
+            .padding(22)
+        }
+    }
+
+    @ViewBuilder
+    private var verdictActions: some View {
+        if store.isRevealOn {
+            if store.section == .newRun {
+                Button {
+                    store.viewActiveRunInHistory()
+                } label: {
+                    Label("View in History", systemImage: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    store.startNewRun()
+                } label: {
+                    Label("Start New Run", systemImage: "plus.circle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isBackgroundRunActive)
+            }
+
+            Button("Update verdict") { store.saveManualVerdict() }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity)
+                .disabled(store.winningLaneID == nil)
+        } else {
+            Button("Skip verdict and reveal") { store.skipManualVerdict() }
+                .buttonStyle(.bordered)
+                .frame(maxWidth: .infinity)
+
+            Button("Save manual verdict") { store.saveManualVerdict() }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity)
+                .disabled(store.winningLaneID == nil)
+        }
+    }
+
+    private var statusDescription: String {
+        switch lane.state {
+        case .queued: "Waiting to start"
+        case .starting: "Starting response"
+        case .running: lane.output.isEmpty ? "Generating response" : "Streaming response"
+        case .waitingForApproval: "Waiting for your approval"
+        case .completed: "Response complete"
+        case .failed: "Candidate failed"
+        case .timedOut: "Candidate timed out"
+        case .cancelled: "Candidate cancelled"
+        case .interrupted: "Run interrupted"
+        }
+    }
+}
+
+private struct FocusReaderSectionPositionKey: PreferenceKey {
+    static let defaultValue: [String: CGFloat] = [:]
+
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
     }
 }
 
@@ -637,4 +1454,3 @@ struct LaneStatusBadge: View {
         }
     }
 }
-

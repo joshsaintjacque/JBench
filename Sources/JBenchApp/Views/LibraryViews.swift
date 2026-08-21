@@ -325,9 +325,29 @@ private struct NotificationsSettings: View {
 
 struct StateBadge: View {
     let state: AggregateRunState
-    private var color: Color { state == .completed ? .green : state == .partiallyCompleted ? .orange : .red }
+    private var color: Color {
+        switch state {
+        case .queued: .secondary
+        case .running: .blue
+        case .waitingForApproval: .purple
+        case .completed: .green
+        case .partiallyCompleted: .orange
+        case .failed: .red
+        case .cancelled: .secondary
+        case .interrupted: .pink
+        }
+    }
+
+    private var label: String {
+        switch state {
+        case .partiallyCompleted: "Partial"
+        case .waitingForApproval: "Approval"
+        default: state.rawValue.capitalized
+        }
+    }
+
     var body: some View {
-        Text(state == .partiallyCompleted ? "Partial" : state.rawValue.capitalized)
+        Text(label)
             .font(.caption2).padding(.horizontal, 6).padding(.vertical, 3)
             .background(color.opacity(0.12), in: Capsule()).foregroundStyle(color)
     }

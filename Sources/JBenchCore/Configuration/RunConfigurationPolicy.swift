@@ -30,9 +30,11 @@ public struct RunConfigurationPolicy: Sendable {
         isBackgroundRunActive: Bool,
         settings: DiscoverySettings
     ) -> Bool {
+        // Multiple benchmark runs may be active at the same time. Other lifecycle
+        // actions keep their own guards in the app store.
+        _ = isBackgroundRunActive
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              (Self.minimumLaneCount...Self.maximumLaneCount).contains(configurations.count),
-              !isBackgroundRunActive else {
+              (Self.minimumLaneCount...Self.maximumLaneCount).contains(configurations.count) else {
             return false
         }
 

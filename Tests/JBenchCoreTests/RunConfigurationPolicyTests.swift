@@ -32,7 +32,7 @@ import Testing
     #expect(!policy.canRun(prompt: "  \n", configurations: lanes, isDemoMode: false, isBackgroundRunActive: false, settings: settings))
     #expect(!policy.canRun(prompt: "Compare", configurations: Array(lanes.prefix(1)), isDemoMode: false, isBackgroundRunActive: false, settings: settings))
     #expect(!policy.canRun(prompt: "Compare", configurations: Array(repeating: lanes[0], count: 7), isDemoMode: false, isBackgroundRunActive: false, settings: settings))
-    #expect(!policy.canRun(prompt: "Compare", configurations: lanes, isDemoMode: false, isBackgroundRunActive: true, settings: settings))
+    #expect(policy.canRun(prompt: "Compare", configurations: lanes, isDemoMode: false, isBackgroundRunActive: true, settings: settings))
     #expect(!policy.canRun(prompt: "Compare", configurations: [
         AgentConfiguration(harness: .codex, model: "missing"),
         AgentConfiguration(harness: .codex, model: "sol")

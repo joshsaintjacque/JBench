@@ -168,6 +168,12 @@ private struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .onDeleteCommand {
+            guard store.section == .history,
+                  let selectedHistoryID = store.selectedHistoryID,
+                  filteredHistory.contains(where: { $0.id == selectedHistoryID }) else { return }
+            store.prepareHistoryDeletion(selectedHistoryID)
+        }
         .navigationTitle("JBench")
         .safeAreaInset(edge: .bottom) {
             HStack {
